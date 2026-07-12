@@ -152,11 +152,8 @@ function App() {
     }
   };
 
-  const handleRestartCapture = async () => {
-    await handleStopCapture();
-    setTimeout(() => {
-      handleStartCapture();
-    }, 300);
+  const handleRestartCapture = () => {
+    setBlocks([]);
   };
 
   // Save Settings wrapper
@@ -422,18 +419,21 @@ function App() {
             </div>
 
             <div className="flex items-center gap-2">
-              <button 
-                onClick={handleStartCapture}
-                className="p-2.5 bg-blue-600 hover:bg-blue-500 rounded-xl transition-all shadow-lg shadow-blue-600/10 hover:shadow-blue-600/25 flex items-center gap-1.5 text-xs font-semibold text-white border border-blue-500/20"
-              >
-                <Play className="w-3.5 h-3.5 fill-current" /> Start
-              </button>
-              <button 
-                onClick={handleStopCapture}
-                className="p-2.5 bg-darkblue-900/80 hover:bg-darkblue-850 rounded-xl transition-all border border-darkblue-850 flex items-center gap-1.5 text-xs font-semibold text-slate-300 hover:text-white"
-              >
-                <Square className="w-3.5 h-3.5 text-slate-400 fill-current" /> Stop
-              </button>
+              {status === "Listening" || status === "Inferring" ? (
+                <button 
+                  onClick={handleStopCapture}
+                  className="p-2.5 bg-rose-600 hover:bg-rose-500 rounded-xl transition-all shadow-lg shadow-rose-600/10 hover:shadow-rose-600/25 flex items-center gap-1.5 text-xs font-semibold text-white border border-rose-500/20"
+                >
+                  <Square className="w-3.5 h-3.5 fill-current" /> Stop
+                </button>
+              ) : (
+                <button 
+                  onClick={handleStartCapture}
+                  className="p-2.5 bg-blue-600 hover:bg-blue-500 rounded-xl transition-all shadow-lg shadow-blue-600/10 hover:shadow-blue-600/25 flex items-center gap-1.5 text-xs font-semibold text-white border border-blue-500/20"
+                >
+                  <Play className="w-3.5 h-3.5 fill-current" /> Start
+                </button>
+              )}
               <button 
                 onClick={handleRestartCapture}
                 className="p-2.5 bg-darkblue-900/80 hover:bg-darkblue-850 rounded-xl transition-all border border-darkblue-850 text-slate-400 hover:text-white"
