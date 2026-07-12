@@ -11,7 +11,7 @@ use screencapturekit::shareable_content::SCShareableContent;
 use tokio::sync::mpsc::Sender;
 
 // Silence detection settings
-const RMS_THRESHOLD: f32 = 0.003;        // Energy threshold for speech
+const RMS_THRESHOLD: f32 = 0.001;        // Energy threshold for speech (more sensitive for digital speaker capture)
 const SILENCE_DURATION_SEC: f32 = 1.5;   // Silence duration to trigger segment boundary
 const MAX_BUFFER_DURATION_SEC: f32 = 15.0; // Max audio chunk duration to prevent overflow
 
@@ -46,6 +46,19 @@ impl SCStreamOutput for AudioStreamHandler {
             
             let channels = format_desc.audio_channel_count().unwrap_or(2) as usize;
             let sample_rate = format_desc.audio_sample_rate().unwrap_or(48000.0) as f32;
+
+            static ONCE: std::sync::Once = std::sync::Once::new();
+            ONCE.call_once(|| {
+                println!(
+                    "[Audio Format] channels: {}, sample_rate: {}, bits: {:?}, is_float: {}, bytes_per_frame: {:?}, num_buffers: {}",
+                    channels,
+                    sample_rate,
+                    format_desc.audio_bits_per_channel(),
+                    format_desc.audio_is_float(),
+                    format_desc.audio_bytes_per_frame(),
+                    sample.audio_buffer_list().map(|l| l.num_buffers()).unwrap_or(0)
+                );
+            });
 
             // Get Audio Buffer List
             let audio_buffer_list = sample.audio_buffer_list();
@@ -106,6 +119,15 @@ impl SCStreamOutput for AudioStreamHandler {
                 state.silence_samples = 0;
             } else {
                 state.silence_samples += resampled.len();
+            }
+
+            // Truncate silent buffers to avoid holding onto/transcribing pure silence
+            if !state.is_speaking {
+                let pre_roll_samples = 16000; // 1.0 second at 16kHz
+                if state.buffered_audio.len() > pre_roll_samples {
+                    let drain_len = state.buffered_audio.len() - pre_roll_samples;
+                    state.buffered_audio.drain(0..drain_len);
+                }
             }
 
             // Threshold in samples at 16kHz
@@ -206,3 +228,40 @@ impl CaptureSession {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+
+    #[tokio::test]
+    async fn test_audio_capture_properties() {
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<Vec<f32>>(100);
+        println!("Starting audio capture test...");
+        let session = CaptureSession::start(tx);
+        match session {
+            Ok(s) => {
+                println!("Capture session started successfully!");
+                // Wait to see if we get any audio chunk
+                let mut received = 0;
+                for _ in 0..10 {
+                    if let Ok(Some(data)) = tokio::time::timeout(Duration::from_secs(2), rx.recv()).await {
+                        println!("Received audio chunk of length: {}", data.len());
+                        received += 1;
+                        if received >= 3 {
+                            break;
+                        }
+                    } else {
+                        println!("Waiting for audio chunk...");
+                    }
+                }
+
+                s.stop().unwrap();
+            }
+            Err(e) => {
+                println!("Failed to start capture session: {}", e);
+            }
+        }
+    }
+}
+

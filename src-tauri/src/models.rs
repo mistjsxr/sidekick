@@ -239,3 +239,25 @@ pub async fn download_models(app_handle: AppHandle) -> Result<(), String> {
 
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    #[test]
+    fn test_load_models() {
+        let app_data_dir = PathBuf::from("/Users/mistjs/Library/Application Support/com.sidekick.app");
+        let whisper_path = app_data_dir.join("ggml-tiny.en.bin");
+        let qwen_path = app_data_dir.join("qwen2.5-1.5b-instruct-q4_k_m.gguf");
+        assert!(whisper_path.exists());
+        assert!(qwen_path.exists());
+        let res = ModelEngines::load(&whisper_path, &qwen_path);
+        println!("Load result: {:?}", res.is_ok());
+        if let Err(e) = &res {
+            println!("Error: {}", e);
+        }
+        assert!(res.is_ok());
+    }
+}
+
