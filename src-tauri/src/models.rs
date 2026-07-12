@@ -14,8 +14,8 @@ use std::num::NonZeroU32;
 
 pub struct ModelEngines {
     pub whisper_ctx: WhisperContext,
-    pub llama_backend: LlamaBackend,
     pub llama_model: LlamaModel,
+    pub llama_backend: LlamaBackend,
 }
 
 impl ModelEngines {
@@ -43,8 +43,8 @@ impl ModelEngines {
 
         Ok(ModelEngines {
             whisper_ctx,
-            llama_backend,
             llama_model,
+            llama_backend,
         })
     }
 

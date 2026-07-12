@@ -82,6 +82,90 @@ fn save_system_prompt(state: State<'_, AppState>, app_handle: tauri::AppHandle, 
     Ok(())
 }
 
+#[tauri::command]
+async fn delete_models(state: State<'_, AppState>, app_handle: tauri::AppHandle) -> Result<(), String> {
+    let mut engines_guard = state.engines.lock().unwrap();
+    *engines_guard = None;
+
+    let app_data_dir = app_handle.path().app_data_dir()
+        .map_err(|e| format!("Failed to resolve App Data directory: {}", e))?;
+    
+    let whisper_path = app_data_dir.join("ggml-tiny.en.bin");
+    let qwen_path = app_data_dir.join("qwen2.5-1.5b-instruct-q4_k_m.gguf");
+
+    if whisper_path.exists() {
+        fs::remove_file(&whisper_path)
+            .map_err(|e| format!("Failed to delete Whisper model: {}", e))?;
+    }
+    if qwen_path.exists() {
+        fs::remove_file(&qwen_path)
+            .map_err(|e| format!("Failed to delete Qwen LLM model: {}", e))?;
+    }
+
+    Ok(())
+}
+
+#[tauri::command]
+async fn eject_models(state: State<'_, AppState>) -> Result<(), String> {
+    let mut engines_guard = state.engines.lock().unwrap();
+    *engines_guard = None;
+    Ok(())
+}
+
+#[tauri::command]
+fn check_models_mounted(state: State<'_, AppState>) -> bool {
+    let engines_guard = state.engines.lock().unwrap();
+    engines_guard.is_some()
+}
+
+#[tauri::command]
+async fn reset_app(state: State<'_, AppState>, app_handle: tauri::AppHandle) -> Result<(), String> {
+    let mut engines_guard = state.engines.lock().unwrap();
+    *engines_guard = None;
+
+    let mut prompt_guard = state.system_prompt.lock().unwrap();
+    *prompt_guard = "You are a helpful assistant. Give a concise, clear answer suitable for a job interview. Keep it to 1-2 short sentences.".to_string();
+
+    let app_data_dir = app_handle.path().app_data_dir()
+        .map_err(|e| format!("Failed to resolve App Data directory: {}", e))?;
+
+    if app_data_dir.exists() {
+        fs::remove_dir_all(&app_data_dir)
+            .map_err(|e| format!("Failed to delete App Data directory: {}", e))?;
+        let _ = fs::create_dir_all(&app_data_dir);
+    }
+
+    Ok(())
+}
+
+#[tauri::command]
+fn check_screen_permission() -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        if let Ok(content) = screencapturekit::shareable_content::SCShareableContent::get() {
+            !content.displays().is_empty()
+        } else {
+            false
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        true
+    }
+}
+
+#[tauri::command]
+fn request_screen_permission() -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        use std::process::Command;
+        let _ = Command::new("open")
+            .arg("x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture")
+            .spawn();
+    }
+    Ok(())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let (tx, mut rx) = tokio::sync::mpsc::channel::<Vec<f32>>(100);
@@ -202,9 +286,15 @@ pub fn run() {
             stop_capture,
             models::check_models_exist,
             models::download_models,
+            delete_models,
+            eject_models,
+            check_models_mounted,
+            reset_app,
             load_models,
             get_system_prompt,
-            save_system_prompt
+            save_system_prompt,
+            check_screen_permission,
+            request_screen_permission
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
