@@ -482,7 +482,7 @@ function App() {
                 <div className="space-y-4 bg-darkblue-950/45 p-4 rounded-2xl border border-darkblue-800/40">
                   <div>
                     <div className="flex justify-between text-xs mb-1.5">
-                      <span className="text-slate-400">Whisper Tiny STT</span>
+                      <span className="text-slate-400">Whisper Large-v3-Turbo Q8</span>
                       <span className="text-cyan-glowing font-mono font-bold">{downloadProgress.whisper}%</span>
                     </div>
                     <div className="w-full bg-darkblue-800 h-2 rounded-full overflow-hidden">
@@ -494,7 +494,7 @@ function App() {
                   </div>
                   <div>
                     <div className="flex justify-between text-xs mb-1.5">
-                      <span className="text-slate-400">Qwen 1.7B LLM</span>
+                      <span className="text-slate-400">Qwen3.5 2B LLM</span>
                       <span className="text-cyan-glowing font-mono font-bold">{downloadProgress.llm}%</span>
                     </div>
                     <div className="w-full bg-darkblue-800 h-2 rounded-full overflow-hidden">
@@ -511,7 +511,7 @@ function App() {
                   onClick={startDownload}
                   className="w-full py-3 bg-gradient-to-r from-blue-glowing to-cyan-glowing hover:opacity-90 disabled:opacity-40 disabled:cursor-not-allowed rounded-xl text-sm font-bold text-darkblue-950 shadow-lg shadow-cyan-500/10 hover:shadow-cyan-500/25 transition-all duration-300"
                 >
-                  Download Models (~1.2 GB)
+                  Download Models (~2.2 GB)
                 </button>
               )}
             </div>
@@ -747,7 +747,7 @@ function App() {
 
                 <div className="bg-darkblue-900/60 p-6 rounded-2xl border border-darkblue-850/60 space-y-4 shadow-xl backdrop-blur-md">
                   <div className="flex items-center justify-between text-sm">
-                    <span className="text-slate-300 font-medium">Whisper Tiny STT</span>
+                    <span className="text-slate-300 font-medium">Whisper Large-v3-Turbo Q8</span>
                     <div className="flex items-center gap-1.5 font-semibold">
                       {!modelsExist ? (
                         <>
@@ -768,7 +768,7 @@ function App() {
                     </div>
                   </div>
                   <div className="flex items-center justify-between text-sm">
-                    <span className="text-slate-300 font-medium">Qwen 1.7B LLM</span>
+                    <span className="text-slate-300 font-medium">Qwen3.5 2B LLM</span>
                     <div className="flex items-center gap-1.5 font-semibold">
                       {!modelsExist ? (
                         <>
@@ -793,7 +793,7 @@ function App() {
                     <div className="space-y-4 pt-4 border-t border-darkblue-850/40">
                       <div>
                         <div className="flex justify-between text-xs mb-1.5">
-                          <span className="text-slate-400">Whisper Tiny STT</span>
+                          <span className="text-slate-400">Whisper Large-v3-Turbo Q8</span>
                           <span className="text-cyan-glowing font-bold">{downloadProgress.whisper}%</span>
                         </div>
                         <div className="w-full bg-darkblue-800 h-2 rounded-full overflow-hidden">
@@ -805,7 +805,7 @@ function App() {
                       </div>
                       <div>
                         <div className="flex justify-between text-xs mb-1.5">
-                          <span className="text-slate-400">Qwen 1.7B LLM</span>
+                          <span className="text-slate-400">Qwen3.5 2B LLM</span>
                           <span className="text-cyan-glowing font-bold">{downloadProgress.llm}%</span>
                         </div>
                         <div className="w-full bg-darkblue-800 h-2 rounded-full overflow-hidden">
@@ -833,7 +833,7 @@ function App() {
                         showDeleteConfirm ? (
                           <div className="bg-rose-950/20 border border-rose-500/25 rounded-2xl p-6 space-y-4">
                             <p className="text-xs text-rose-200 font-semibold leading-relaxed">
-                              Are you sure you want to delete the local models? This will free up ~1.2 GB of disk space.
+                              Are you sure you want to delete the local models? This will free up ~2.2 GB of disk space.
                             </p>
                             <div className="flex gap-3">
                               <button
@@ -872,7 +872,7 @@ function App() {
                         onClick={handleDownloadModelsInSettings}
                         className="w-full py-3 bg-gradient-to-r from-blue-glowing to-cyan-glowing hover:opacity-90 text-darkblue-950 rounded-xl text-sm font-bold transition-all duration-300 cursor-pointer text-center"
                       >
-                        Download Models (~1.2 GB)
+                        Download Models (~2.2 GB)
                       </button>
                     )}
                   </div>
@@ -901,7 +901,7 @@ function App() {
                       <div className="bg-rose-950/20 border border-rose-500/25 rounded-2xl p-5 space-y-3">
                         <h4 className="text-sm font-bold text-rose-300">Confirm Application Reset</h4>
                         <p className="text-xs text-rose-200 leading-relaxed font-semibold">
-                          Are you sure you want to restore the app? This will completely wipe all downloaded model files (~1.2 GB), reset your custom prompts, and return you back to onboarding. This action is irreversible.
+                          Are you sure you want to restore the app? This will completely wipe all downloaded model files (~2.2 GB), reset your custom prompts, and return you back to onboarding. This action is irreversible.
                         </p>
                       </div>
                       <div className="flex gap-3">

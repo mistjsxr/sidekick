@@ -1,3 +1,9 @@
+[workspace]
+members = [
+    ".",
+    "whisper_worker"
+]
+
 [package]
 name = "sidekick"
 version = "0.1.0"
@@ -24,7 +30,6 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["full"] }
 screencapturekit = "8.0.0"
-whisper-rs = { version = "0.16" }
 llama-cpp-2 = { version = "0.1", features = ["metal"] }
 futures = "0.3"
 chrono = "0.4"

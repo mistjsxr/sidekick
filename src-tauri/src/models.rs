@@ -3,7 +3,6 @@ use std::io::Write;
 use std::path::Path;
 use futures_util::StreamExt;
 use tauri::{AppHandle, Emitter, Manager};
-use whisper_rs::{WhisperContext, WhisperContextParameters};
 use llama_cpp_2::llama_backend::LlamaBackend;
 use llama_cpp_2::model::{LlamaModel, AddBos};
 use llama_cpp_2::model::params::LlamaModelParams;
@@ -13,19 +12,14 @@ use llama_cpp_2::sampling::LlamaSampler;
 use std::num::NonZeroU32;
 
 pub struct ModelEngines {
-    pub whisper_ctx: WhisperContext,
     pub llama_model: LlamaModel,
     pub llama_backend: LlamaBackend,
 }
 
 impl ModelEngines {
     pub fn load(whisper_path: &Path, qwen_path: &Path) -> Result<Self, String> {
-        println!("[Inference Engine] Loading Whisper model from {:?}", whisper_path);
-        let whisper_ctx = WhisperContext::new_with_params(
-            whisper_path.to_str().ok_or("Invalid Whisper path")?,
-            WhisperContextParameters::default(),
-        )
-        .map_err(|e| format!("Failed to load Whisper model: {}", e))?;
+        // whisper_path is unused here but kept for signature compatibility during transition
+        let _ = whisper_path;
 
         println!("[Inference Engine] Initializing LLaMA Backend...");
         let llama_backend = LlamaBackend::init()
@@ -42,40 +36,9 @@ impl ModelEngines {
         .map_err(|e| format!("Failed to load LLaMA model: {}", e))?;
 
         Ok(ModelEngines {
-            whisper_ctx,
             llama_model,
             llama_backend,
         })
-    }
-
-    pub fn transcribe(&self, audio_data: &[f32]) -> Result<String, String> {
-        let mut state = self.whisper_ctx.create_state()
-            .map_err(|e| format!("Failed to create Whisper state: {}", e))?;
-
-        let mut params = whisper_rs::FullParams::new(whisper_rs::SamplingStrategy::Greedy { best_of: 1 });
-        params.set_language(Some("en"));
-        params.set_n_threads(4);
-        params.set_single_segment(true);
-        params.set_print_special(false);
-        params.set_print_progress(false);
-        params.set_print_realtime(false);
-        params.set_print_timestamps(false);
-
-        state.full(params, audio_data)
-            .map_err(|e| format!("Whisper transcription failed: {}", e))?;
-
-        let num_segments = state.full_n_segments();
-
-        let mut transcript = String::new();
-        for i in 0..num_segments {
-            if let Some(segment) = state.get_segment(i) {
-                if let Ok(segment_text) = segment.to_str() {
-                    transcript.push_str(segment_text);
-                }
-            }
-        }
-
-        Ok(transcript.trim().to_string())
     }
 
     pub fn answer_question<F>(&self, system_prompt: &str, question: &str, on_token: F) -> Result<(), String>
@@ -192,8 +155,8 @@ async fn download_file(
 #[tauri::command]
 pub fn check_models_exist(app_handle: AppHandle) -> bool {
     if let Ok(app_data_dir) = app_handle.path().app_data_dir() {
-        let whisper_path = app_data_dir.join("ggml-tiny.en.bin");
-        let qwen_path = app_data_dir.join("qwen2.5-1.5b-instruct-q4_k_m.gguf");
+        let whisper_path = app_data_dir.join("ggml-large-v3-turbo-q8_0.bin");
+        let qwen_path = app_data_dir.join("Qwen3.5-2B-Q4_K_M.gguf");
         whisper_path.exists() && qwen_path.exists()
     } else {
         false
@@ -208,14 +171,14 @@ pub async fn download_models(app_handle: AppHandle) -> Result<(), String> {
     std::fs::create_dir_all(&app_data_dir)
         .map_err(|e| format!("Failed to create App Data directory: {}", e))?;
 
-    let whisper_path = app_data_dir.join("ggml-tiny.en.bin");
-    let qwen_path = app_data_dir.join("qwen2.5-1.5b-instruct-q4_k_m.gguf");
+    let whisper_path = app_data_dir.join("ggml-large-v3-turbo-q8_0.bin");
+    let qwen_path = app_data_dir.join("Qwen3.5-2B-Q4_K_M.gguf");
 
     // 1. Download Whisper
     if !whisper_path.exists() {
         download_file(
             &app_handle,
-            "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-tiny.en.bin",
+            "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-large-v3-turbo-q8_0.bin",
             &whisper_path,
             "whisper",
         )
@@ -228,7 +191,7 @@ pub async fn download_models(app_handle: AppHandle) -> Result<(), String> {
     if !qwen_path.exists() {
         download_file(
             &app_handle,
-            "https://huggingface.co/Qwen/Qwen2.5-1.5B-Instruct-GGUF/resolve/main/qwen2.5-1.5b-instruct-q4_k_m.gguf",
+            "https://huggingface.co/unsloth/Qwen3.5-2B-GGUF/resolve/main/Qwen3.5-2B-Q4_K_M.gguf",
             &qwen_path,
             "llm",
         )
@@ -248,8 +211,8 @@ mod tests {
     #[test]
     fn test_load_models() {
         let app_data_dir = PathBuf::from("/Users/mistjs/Library/Application Support/com.sidekick.app");
-        let whisper_path = app_data_dir.join("ggml-tiny.en.bin");
-        let qwen_path = app_data_dir.join("qwen2.5-1.5b-instruct-q4_k_m.gguf");
+        let whisper_path = app_data_dir.join("ggml-large-v3-turbo-q8_0.bin");
+        let qwen_path = app_data_dir.join("Qwen3.5-2B-Q4_K_M.gguf");
         assert!(whisper_path.exists());
         assert!(qwen_path.exists());
         let res = ModelEngines::load(&whisper_path, &qwen_path);

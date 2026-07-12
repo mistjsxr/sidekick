@@ -5,10 +5,106 @@ use std::fs;
 mod audio;
 mod models;
 
+struct WhisperWorker {
+    child: std::process::Child,
+    stdin: std::process::ChildStdin,
+    stdout: std::process::ChildStdout,
+}
+
+impl WhisperWorker {
+    fn spawn(model_path: &std::path::Path) -> Result<Self, String> {
+        let worker_bin = get_worker_path()?;
+        println!("[Main Process] Spawning Whisper Worker sidecar: {:?}", worker_bin);
+        
+        let mut child = std::process::Command::new(worker_bin)
+            .arg(model_path)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .map_err(|e| format!("Failed to spawn whisper_worker: {}", e))?;
+            
+        let stdin = child.stdin.take().ok_or("Failed to open stdin for worker")?;
+        let stdout = child.stdout.take().ok_or("Failed to open stdout for worker")?;
+        
+        Ok(WhisperWorker { child, stdin, stdout })
+    }
+    
+    fn transcribe(&mut self, audio_data: &[f32]) -> Result<String, String> {
+        use std::io::{Read, Write};
+        
+        // 1. Send number of samples (u32, 4 bytes)
+        let num_samples = audio_data.len() as u32;
+        self.stdin.write_all(&num_samples.to_le_bytes())
+            .map_err(|e| format!("Failed to write sample count: {}", e))?;
+            
+        // 2. Send float samples (num_samples * 4 bytes)
+        let mut byte_buf = vec![0u8; audio_data.len() * 4];
+        for (i, &sample) in audio_data.iter().enumerate() {
+            let val_bytes = sample.to_le_bytes();
+            let start = i * 4;
+            byte_buf[start] = val_bytes[0];
+            byte_buf[start + 1] = val_bytes[1];
+            byte_buf[start + 2] = val_bytes[2];
+            byte_buf[start + 3] = val_bytes[3];
+        }
+        self.stdin.write_all(&byte_buf)
+            .map_err(|e| format!("Failed to write audio samples: {}", e))?;
+        self.stdin.flush()
+            .map_err(|e| format!("Failed to flush stdin: {}", e))?;
+            
+        // 3. Read response text length (u32, 4 bytes)
+        let mut len_bytes = [0u8; 4];
+        self.stdout.read_exact(&mut len_bytes)
+            .map_err(|e| format!("Failed to read response length: {}", e))?;
+        let text_len = u32::from_le_bytes(len_bytes) as usize;
+        
+        // 4. Read response string bytes
+        let mut text_bytes = vec![0u8; text_len];
+        self.stdout.read_exact(&mut text_bytes)
+            .map_err(|e| format!("Failed to read response string: {}", e))?;
+            
+        let text = String::from_utf8(text_bytes)
+            .map_err(|e| format!("Invalid UTF-8 from worker: {}", e))?;
+            
+        Ok(text)
+    }
+}
+
+impl Drop for WhisperWorker {
+    fn drop(&mut self) {
+        println!("[Main Process] Stopping Whisper Worker sidecar...");
+        let _ = self.child.kill();
+    }
+}
+
+fn get_worker_path() -> Result<std::path::PathBuf, String> {
+    let current_exe = std::env::current_exe().map_err(|e| format!("Failed to get current exe path: {}", e))?;
+    let exe_dir = current_exe.parent().ok_or("Failed to get exe directory")?;
+    
+    // During dev, it will be in the same target/debug folder as sidekick
+    let dev_path = exe_dir.join("whisper_worker");
+    if dev_path.exists() {
+        return Ok(dev_path);
+    }
+    
+    // Fallback search in exe directory in case of name suffixes or bundling
+    if let Ok(entries) = std::fs::read_dir(exe_dir) {
+        for entry in entries.flatten() {
+            let filename = entry.file_name().to_string_lossy().into_owned();
+            if filename.starts_with("whisper_worker") {
+                return Ok(entry.path());
+            }
+        }
+    }
+    
+    Err("whisper_worker binary not found. Please build the workspace first.".to_string())
+}
+
 struct AppState {
     capture_session: Mutex<Option<audio::CaptureSession>>,
     transcribe_tx: tokio::sync::mpsc::Sender<Vec<f32>>,
     engines: Mutex<Option<models::ModelEngines>>,
+    whisper_worker: Mutex<Option<WhisperWorker>>,
     system_prompt: Mutex<String>,
 }
 
@@ -36,22 +132,28 @@ async fn stop_capture(state: State<'_, AppState>) -> Result<(), String> {
 #[tauri::command]
 async fn load_models(state: State<'_, AppState>, app_handle: tauri::AppHandle) -> Result<(), String> {
     let mut engines_guard = state.engines.lock().unwrap();
-    if engines_guard.is_some() {
-        return Ok(());
-    }
-
+    
     let app_data_dir = app_handle.path().app_data_dir()
         .map_err(|e| format!("Failed to resolve App Data directory: {}", e))?;
     
-    let whisper_path = app_data_dir.join("ggml-tiny.en.bin");
-    let qwen_path = app_data_dir.join("qwen2.5-1.5b-instruct-q4_k_m.gguf");
+    let whisper_path = app_data_dir.join("ggml-large-v3-turbo-q8_0.bin");
+    let qwen_path = app_data_dir.join("Qwen3.5-2B-Q4_K_M.gguf");
 
     if !whisper_path.exists() || !qwen_path.exists() {
         return Err("Model files are missing. Please complete onboarding first.".to_string());
     }
 
-    let engines = models::ModelEngines::load(&whisper_path, &qwen_path)?;
-    *engines_guard = Some(engines);
+    if engines_guard.is_none() {
+        let engines = models::ModelEngines::load(&whisper_path, &qwen_path)?;
+        *engines_guard = Some(engines);
+    }
+
+    let mut worker_guard = state.whisper_worker.lock().unwrap();
+    if worker_guard.is_none() {
+        let worker = WhisperWorker::spawn(&whisper_path)?;
+        *worker_guard = Some(worker);
+    }
+
     Ok(())
 }
 
@@ -87,11 +189,14 @@ async fn delete_models(state: State<'_, AppState>, app_handle: tauri::AppHandle)
     let mut engines_guard = state.engines.lock().unwrap();
     *engines_guard = None;
 
+    let mut worker_guard = state.whisper_worker.lock().unwrap();
+    *worker_guard = None;
+
     let app_data_dir = app_handle.path().app_data_dir()
         .map_err(|e| format!("Failed to resolve App Data directory: {}", e))?;
     
-    let whisper_path = app_data_dir.join("ggml-tiny.en.bin");
-    let qwen_path = app_data_dir.join("qwen2.5-1.5b-instruct-q4_k_m.gguf");
+    let whisper_path = app_data_dir.join("ggml-large-v3-turbo-q8_0.bin");
+    let qwen_path = app_data_dir.join("Qwen3.5-2B-Q4_K_M.gguf");
 
     if whisper_path.exists() {
         fs::remove_file(&whisper_path)
@@ -109,6 +214,10 @@ async fn delete_models(state: State<'_, AppState>, app_handle: tauri::AppHandle)
 async fn eject_models(state: State<'_, AppState>) -> Result<(), String> {
     let mut engines_guard = state.engines.lock().unwrap();
     *engines_guard = None;
+
+    let mut worker_guard = state.whisper_worker.lock().unwrap();
+    *worker_guard = None;
+
     Ok(())
 }
 
@@ -122,6 +231,9 @@ fn check_models_mounted(state: State<'_, AppState>) -> bool {
 async fn reset_app(state: State<'_, AppState>, app_handle: tauri::AppHandle) -> Result<(), String> {
     let mut engines_guard = state.engines.lock().unwrap();
     *engines_guard = None;
+
+    let mut worker_guard = state.whisper_worker.lock().unwrap();
+    *worker_guard = None;
 
     let mut prompt_guard = state.system_prompt.lock().unwrap();
     *prompt_guard = "You are a helpful assistant. Give a concise, clear answer suitable for a job interview. Keep it to 1-2 short sentences.".to_string();
@@ -183,11 +295,10 @@ pub fn run() {
                 while let Some(audio_chunk) = rx.recv().await {
                     let state: State<'_, AppState> = state_app_handle.state();
                     
-                    let engines_guard = state.engines.lock().unwrap();
-                    if let Some(engines) = &*engines_guard {
+                    let mut worker_guard = state.whisper_worker.lock().unwrap();
+                    if let Some(worker) = &mut *worker_guard {
                         println!("[AI Engine] Transcribing audio chunk ({} samples)...", audio_chunk.len());
-                        
-                        match engines.transcribe(&audio_chunk) {
+                        match worker.transcribe(&audio_chunk) {
                             Ok(text) => {
                                 if text.is_empty() {
                                     println!("[AI Engine] Whisper output was empty silence.");
@@ -251,7 +362,7 @@ pub fn run() {
                                 }
                             }
                             Err(e) => {
-                                eprintln!("[AI Engine] Whisper error: {}", e);
+                                eprintln!("[AI Engine] Whisper subprocess error: {}", e);
                             }
                         }
                     } else {
@@ -262,8 +373,8 @@ pub fn run() {
 
             // Initialize app state
             let app_data_dir = app.handle().path().app_data_dir().unwrap();
-            let whisper_path = app_data_dir.join("ggml-tiny.en.bin");
-            let qwen_path = app_data_dir.join("qwen2.5-1.5b-instruct-q4_k_m.gguf");
+            let whisper_path = app_data_dir.join("ggml-large-v3-turbo-q8_0.bin");
+            let qwen_path = app_data_dir.join("Qwen3.5-2B-Q4_K_M.gguf");
 
             // Attempt to load models instantly if they already exist
             let loaded_engines = if whisper_path.exists() && qwen_path.exists() {
@@ -272,10 +383,17 @@ pub fn run() {
                 None
             };
 
+            let loaded_worker = if loaded_engines.is_some() && whisper_path.exists() {
+                WhisperWorker::spawn(&whisper_path).ok()
+            } else {
+                None
+            };
+
             app.manage(AppState {
                 capture_session: Mutex::new(None),
                 transcribe_tx: tx,
                 engines: Mutex::new(loaded_engines),
+                whisper_worker: Mutex::new(loaded_worker),
                 system_prompt: Mutex::new("You are a helpful assistant. Give a concise, clear answer suitable for a job interview. Keep it to 1-2 short sentences.".to_string()),
             });
 
@@ -296,6 +414,24 @@ pub fn run() {
             check_screen_permission,
             request_screen_permission
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|app_handle, event| {
+            if let tauri::RunEvent::Exit = event {
+                println!("[Main Process] Tauri application exiting, dropping model contexts...");
+                let state = app_handle.state::<AppState>();
+                
+                let mut engines_guard = state.engines.lock();
+                if let Ok(ref mut guard) = engines_guard {
+                    **guard = None;
+                }
+                drop(engines_guard);
+
+                let mut worker_guard = state.whisper_worker.lock();
+                if let Ok(ref mut guard) = worker_guard {
+                    **guard = None;
+                }
+                drop(worker_guard);
+            }
+        });
 }

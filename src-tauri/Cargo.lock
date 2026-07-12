@@ -3539,7 +3539,6 @@ dependencies = [
  "tauri-build",
  "tauri-plugin-opener",
  "tokio",
- "whisper-rs",
 ]
 
 [[package]]
@@ -4879,6 +4878,13 @@ dependencies = [
  "cmake",
  "fs_extra",
  "semver",
+]
+
+[[package]]
+name = "whisper_worker"
+version = "0.1.0"
+dependencies = [
+ "whisper-rs",
 ]
 
 [[package]]
