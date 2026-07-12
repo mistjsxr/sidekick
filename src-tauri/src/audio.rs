@@ -1,11 +1,13 @@
 use std::sync::{Arc, Mutex};
-use screencapturekit::cm_sample_buffer::CMSampleBuffer;
-use screencapturekit::sc_content_filter::{SCContentFilter, InitParams};
-use screencapturekit::sc_error_handler::StreamErrorHandler;
-use screencapturekit::sc_output_handler::{SCStreamOutputType, StreamOutput};
-use screencapturekit::sc_shareable_content::SCShareableContent;
-use screencapturekit::sc_stream::SCStream;
-use screencapturekit::sc_stream_configuration::SCStreamConfiguration;
+use screencapturekit::stream::SCStream;
+use screencapturekit::stream::SCStreamOutput;
+use screencapturekit::stream::SCStreamDelegate;
+use screencapturekit::stream::content_filter::SCContentFilter;
+use screencapturekit::stream::configuration::SCStreamConfiguration;
+use screencapturekit::stream::output_type::SCStreamOutputType;
+use screencapturekit::cm::CMSampleBuffer;
+use screencapturekit::cm::CMSampleBufferExt;
+use screencapturekit::shareable_content::SCShareableContent;
 use tokio::sync::mpsc::Sender;
 
 // Silence detection settings
@@ -15,9 +17,9 @@ const MAX_BUFFER_DURATION_SEC: f32 = 15.0; // Max audio chunk duration to preven
 
 pub struct AudioErrorHandler;
 
-impl StreamErrorHandler for AudioErrorHandler {
-    fn on_error(&self) {
-        eprintln!("[Audio Capture Error] Stream encountered an error.");
+impl SCStreamDelegate for AudioErrorHandler {
+    fn did_stop_with_error(&self, error: screencapturekit::error::SCError) {
+        eprintln!("[Audio Capture Error] Stream stopped with error: {}", error);
     }
 }
 
@@ -32,40 +34,42 @@ pub struct AudioStreamHandler {
     pub state: Arc<Mutex<CaptureState>>,
 }
 
-impl StreamOutput for AudioStreamHandler {
+impl SCStreamOutput for AudioStreamHandler {
     fn did_output_sample_buffer(&self, sample: CMSampleBuffer, of_type: SCStreamOutputType) {
         if let SCStreamOutputType::Audio = of_type {
             // Retrieve Format Description
-            let format_desc = sample.sys_ref.get_format_description();
+            let format_desc = sample.format_description();
             if format_desc.is_none() {
                 return;
             }
+            let format_desc = format_desc.unwrap();
             
-            let asbd = format_desc.unwrap().audio_format_description_get_stream_basic_description().copied();
-            if asbd.is_none() {
+            let channels = format_desc.audio_channel_count().unwrap_or(2) as usize;
+            let sample_rate = format_desc.audio_sample_rate().unwrap_or(48000.0) as f32;
+
+            // Get Audio Buffer List
+            let audio_buffer_list = sample.audio_buffer_list();
+            if audio_buffer_list.is_none() {
                 return;
             }
-            let asbd = asbd.unwrap();
-
-            let channels = asbd.channels_per_frame as usize;
-            let sample_rate = asbd.sample_rate as f32;
-
-            // Get Raw Audio Buffer List
-            let buffers = sample.sys_ref.get_av_audio_buffer_list();
-            if buffers.is_empty() {
+            let audio_buffer_list = audio_buffer_list.unwrap();
+            let num_buffers = audio_buffer_list.num_buffers();
+            if num_buffers == 0 {
                 return;
             }
 
             // Extract f32 samples
-            let src_samples: Vec<f32> = if buffers.len() >= channels && channels > 1 {
+            let src_samples: Vec<f32> = if num_buffers >= channels && channels > 1 {
                 // Non-interleaved: take channel 0 (left channel)
-                let data = &buffers[0].data;
+                let buffer = audio_buffer_list.get(0).unwrap();
+                let data = buffer.data();
                 data.chunks_exact(4)
                     .map(|c| f32::from_ne_bytes(c.try_into().unwrap()))
                     .collect()
             } else {
                 // Interleaved or Mono
-                let raw_bytes = &buffers[0].data;
+                let buffer = audio_buffer_list.get(0).unwrap();
+                let raw_bytes = buffer.data();
                 let interleaved: Vec<f32> = raw_bytes
                     .chunks_exact(4)
                     .map(|c| f32::from_ne_bytes(c.try_into().unwrap()))
@@ -120,7 +124,7 @@ impl StreamOutput for AudioStreamHandler {
 
                 // Send speech chunk asynchronously to the AI engine
                 let tx = state.transcribe_tx.clone();
-                tokio::spawn(async move {
+                tauri::async_runtime::spawn(async move {
                     if let Err(e) = tx.send(audio_chunk).await {
                         eprintln!("[VAD] Failed to send audio chunk to transcription channel: {}", e);
                     }
@@ -160,22 +164,23 @@ pub struct CaptureSession {
 impl CaptureSession {
     pub fn start(transcribe_tx: Sender<Vec<f32>>) -> Result<Self, String> {
         // Fetch shareable display content
-        let mut content = SCShareableContent::try_current()
+        let content = SCShareableContent::get()
             .map_err(|e| format!("Failed to get shareable content: {}", e))?;
         
-        let display = content.displays.pop()
+        let display = content.displays().pop()
             .ok_or_else(|| "No system displays found to capture speaker audio from.".to_string())?;
 
-        let filter = SCContentFilter::new(InitParams::Display(display));
+        let filter = SCContentFilter::create()
+            .with_display(&display)
+            .with_excluding_windows(&[])
+            .build();
 
         // Configure audio capture
-        let config = SCStreamConfiguration {
-            width: 100,
-            height: 100,
-            captures_audio: true,
-            excludes_current_process_audio: false,
-            ..Default::default()
-        };
+        let config = SCStreamConfiguration::new()
+            .with_width(100)
+            .with_height(100)
+            .with_captures_audio(true)
+            .with_excludes_current_process_audio(false);
 
         let state = Arc::new(Mutex::new(CaptureState {
             buffered_audio: Vec::new(),
@@ -184,10 +189,10 @@ impl CaptureSession {
             transcribe_tx,
         }));
 
-        let mut stream = SCStream::new(filter, config, AudioErrorHandler);
+        let mut stream = SCStream::new_with_delegate(&filter, &config, AudioErrorHandler);
         let handler = AudioStreamHandler { state };
         
-        stream.add_output(handler, SCStreamOutputType::Audio);
+        stream.add_output_handler(handler, SCStreamOutputType::Audio);
         stream.start_capture().map_err(|e| format!("Stream start failed: {}", e))?;
 
         println!("[Audio Capture] System speaker stream started successfully.");
