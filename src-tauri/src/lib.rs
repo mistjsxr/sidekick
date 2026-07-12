@@ -236,7 +236,7 @@ async fn reset_app(state: State<'_, AppState>, app_handle: tauri::AppHandle) -> 
     *worker_guard = None;
 
     let mut prompt_guard = state.system_prompt.lock().unwrap();
-    *prompt_guard = "You are a helpful assistant. Give a concise, clear answer suitable for a job interview. Keep it to 1-2 short sentences.".to_string();
+    *prompt_guard = "You are an expert candidate in a job interview. Answer the user's question directly, professionally, and extremely concisely. Your response MUST be only 1 or 2 short sentences suitable for speaking. Do not include any reasoning, thinking process, code blocks, or intro/outro text. Just give the direct answer.".to_string();
 
     let app_data_dir = app_handle.path().app_data_dir()
         .map_err(|e| format!("Failed to resolve App Data directory: {}", e))?;
@@ -347,13 +347,16 @@ pub fn run() {
                                         let engines_guard = engines_ref.engines.lock().unwrap();
                                         if let Some(engines) = &*engines_guard {
                                             let block_id = block_counter.to_string();
+                                            let mut answer_accum = String::new();
                                             let res = engines.answer_question(&system_prompt, &text_clone, |token| {
+                                                answer_accum.push_str(token);
                                                 let token_payload = serde_json::json!({
                                                     "id": block_id.clone(),
                                                     "token": token,
                                                 });
                                                 let _ = app_handle_clone.emit("llm-token", token_payload);
                                             });
+                                            println!("[AI Engine] Answer: \"{}\"", answer_accum);
                                             if let Err(e) = res {
                                                 eprintln!("[AI Engine] Qwen error: {}", e);
                                             }
@@ -394,7 +397,7 @@ pub fn run() {
                 transcribe_tx: tx,
                 engines: Mutex::new(loaded_engines),
                 whisper_worker: Mutex::new(loaded_worker),
-                system_prompt: Mutex::new("You are a helpful assistant. Give a concise, clear answer suitable for a job interview. Keep it to 1-2 short sentences.".to_string()),
+                system_prompt: Mutex::new("You are an expert candidate in a job interview. Answer the user's question directly, professionally, and extremely concisely. Your response MUST be only 1 or 2 short sentences suitable for speaking. Do not include any reasoning, thinking process, code blocks, or intro/outro text. Just give the direct answer.".to_string()),
             });
 
             Ok(())

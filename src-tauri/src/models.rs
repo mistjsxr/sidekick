@@ -11,6 +11,83 @@ use llama_cpp_2::llama_batch::LlamaBatch;
 use llama_cpp_2::sampling::LlamaSampler;
 use std::num::NonZeroU32;
 
+struct ThinkingFilter {
+    buffer: String,
+    in_think: bool,
+}
+
+impl ThinkingFilter {
+    fn new() -> Self {
+        ThinkingFilter {
+            buffer: String::new(),
+            in_think: false,
+        }
+    }
+
+    fn process<F>(&mut self, token: &str, on_token: &mut F)
+    where
+        F: FnMut(&str),
+    {
+        self.buffer.push_str(token);
+
+        loop {
+            if self.in_think {
+                if let Some(pos) = self.buffer.find("</think>") {
+                    self.buffer = self.buffer[pos + 8..].to_string();
+                    self.in_think = false;
+                } else {
+                    if self.buffer.len() > 8 {
+                        let drain_len = self.buffer.len() - 7;
+                        self.buffer = self.buffer[drain_len..].to_string();
+                    }
+                    break;
+                }
+            } else {
+                if let Some(pos) = self.buffer.find("<think>") {
+                    if pos > 0 {
+                        on_token(&self.buffer[..pos]);
+                    }
+                    self.buffer = self.buffer[pos + 7..].to_string();
+                    self.in_think = true;
+                } else {
+                    let mut possible_start = false;
+                    for i in 1..=6 {
+                        if self.buffer.len() >= i {
+                            let suffix = &self.buffer[self.buffer.len() - i..];
+                            if "<think>".starts_with(suffix) {
+                                possible_start = true;
+                                break;
+                            }
+                        }
+                    }
+
+                    if possible_start {
+                        if self.buffer.len() > 6 {
+                            let emit_len = self.buffer.len() - 6;
+                            on_token(&self.buffer[..emit_len]);
+                            self.buffer = self.buffer[emit_len..].to_string();
+                        }
+                        break;
+                    } else {
+                        on_token(&self.buffer);
+                        self.buffer.clear();
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    fn flush<F>(self, on_token: &mut F)
+    where
+        F: FnMut(&str),
+    {
+        if !self.in_think && !self.buffer.is_empty() {
+            on_token(&self.buffer);
+        }
+    }
+}
+
 pub struct ModelEngines {
     pub llama_model: LlamaModel,
     pub llama_backend: LlamaBackend,
@@ -41,9 +118,9 @@ impl ModelEngines {
         })
     }
 
-    pub fn answer_question<F>(&self, system_prompt: &str, question: &str, on_token: F) -> Result<(), String>
+    pub fn answer_question<F>(&self, system_prompt: &str, question: &str, mut on_token: F) -> Result<(), String>
     where
-        F: Fn(&str),
+        F: FnMut(&str),
     {
         // Initialize context size
         let ctx_params = LlamaContextParams::default()
@@ -79,6 +156,7 @@ impl ModelEngines {
         let mut current_pos = tokens.len() as i32;
         let mut generated_tokens = 0;
         let mut decoder = encoding_rs::UTF_8.new_decoder();
+        let mut filter = ThinkingFilter::new();
 
         while generated_tokens < 150 {
             let next_token = sampler.sample(&ctx, (batch.n_tokens() - 1) as i32);
@@ -89,7 +167,7 @@ impl ModelEngines {
             }
 
             if let Ok(piece) = self.llama_model.token_to_piece(next_token, &mut decoder, false, None) {
-                on_token(&piece);
+                filter.process(&piece, &mut on_token);
             }
 
             batch.clear();
@@ -102,6 +180,8 @@ impl ModelEngines {
             current_pos += 1;
             generated_tokens += 1;
         }
+
+        filter.flush(&mut on_token);
 
         Ok(())
     }
