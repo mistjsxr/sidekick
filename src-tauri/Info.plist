@@ -3,8 +3,8 @@
 <plist version="1.0">
 <dict>
     <key>NSScreenCaptureUsageDescription</key>
-    <string>Glance requires screen and system audio recording permission to capture system speaker audio silently for real-time transcription.</string>
+    <string>Sidekick requires screen and system audio recording permission to capture system speaker audio silently for real-time transcription.</string>
     <key>NSMicrophoneUsageDescription</key>
-    <string>Glance requires microphone access for optional voice input processing.</string>
+    <string>Sidekick requires microphone access for optional voice input processing.</string>
 </dict>
 </plist>

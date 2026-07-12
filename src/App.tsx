@@ -1,6 +1,7 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import gsap from "gsap";
 import { 
   Play, 
   Square, 
@@ -44,6 +45,62 @@ function App() {
 
   // App running state
   const [blocks, setBlocks] = useState<TranscriptionBlock[]>([]);
+
+  // DOM Refs for GSAP list slide down
+  const transcriptListRef = useRef<HTMLDivElement>(null);
+  const answersListRef = useRef<HTMLDivElement>(null);
+  const prevBlocksLength = useRef<number>(0);
+  const prevQuestionsLength = useRef<number>(0);
+
+  // GSAP animation on new list items
+  useEffect(() => {
+    // 1. Slide down left transcript list
+    if (blocks.length > prevBlocksLength.current) {
+      if (transcriptListRef.current) {
+        const firstChild = transcriptListRef.current.firstElementChild;
+        if (firstChild) {
+          gsap.fromTo(
+            firstChild,
+            { height: 0, opacity: 0, y: -20, scale: 0.95 },
+            { 
+              height: "auto", 
+              opacity: 1, 
+              y: 0, 
+              scale: 1,
+              duration: 0.6, 
+              ease: "power3.out",
+              clearProps: "all"
+            }
+          );
+        }
+      }
+    }
+    prevBlocksLength.current = blocks.length;
+
+    // 2. Slide down right Q&A answer cards
+    const questionsCount = blocks.filter(b => b.isQuestion).length;
+    if (questionsCount > prevQuestionsLength.current) {
+      if (answersListRef.current) {
+        const firstChild = answersListRef.current.firstElementChild;
+        if (firstChild) {
+          gsap.fromTo(
+            firstChild,
+            { height: 0, opacity: 0, y: -20, scale: 0.95 },
+            { 
+              height: "auto", 
+              opacity: 1, 
+              y: 0, 
+              scale: 1,
+              duration: 0.7, 
+              ease: "power3.out",
+              clearProps: "all"
+            }
+          );
+        }
+      }
+    }
+    prevQuestionsLength.current = questionsCount;
+  }, [blocks]);
 
   // Request permissions placeholder
   const requestPermissions = async () => {
@@ -182,7 +239,7 @@ function App() {
           </div>
           
           <h1 className="text-3xl font-extrabold tracking-tight bg-gradient-to-r from-indigo-400 via-purple-400 to-pink-400 bg-clip-text text-transparent mb-2">
-            Glance
+            Sidekick
           </h1>
           <p className="text-slate-400 text-center mb-8 text-sm leading-relaxed">
             Real-time meeting assistant. Captures system speakers, transcribes with Whisper, and provides answers locally via LLM.
@@ -279,7 +336,7 @@ function App() {
                 <Sliders className="w-4 h-4 text-white" />
               </div>
               <span className="font-bold text-lg bg-gradient-to-r from-indigo-400 to-purple-400 bg-clip-text text-transparent">
-                Glance
+                Sidekick
               </span>
               <div className="h-4 w-px bg-slate-800 mx-2" />
               <div className="flex items-center gap-2 bg-slate-900 px-3 py-1 rounded-full border border-slate-800">
@@ -332,7 +389,7 @@ function App() {
                 <span className="text-[10px] text-slate-500 font-mono">16kHz mono</span>
               </div>
 
-              <div className="space-y-4">
+              <div className="space-y-4" ref={transcriptListRef}>
                 {blocks.map((block) => (
                   <div 
                     key={block.id} 
@@ -363,7 +420,7 @@ function App() {
                 <span className="text-[10px] text-slate-500 font-mono">Qwen GPU</span>
               </div>
 
-              <div className="space-y-4">
+              <div className="space-y-4" ref={answersListRef}>
                 {blocks.filter(b => b.isQuestion).map((block) => (
                   <div key={`ans-${block.id}`} className="bg-gradient-to-br from-indigo-950/20 to-purple-950/20 border border-indigo-900/30 rounded-2xl p-5 space-y-3">
                     <div className="text-xs text-indigo-300 font-semibold border-b border-indigo-900/30 pb-2">
