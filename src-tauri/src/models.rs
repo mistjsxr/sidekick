@@ -118,22 +118,43 @@ impl ModelEngines {
         })
     }
 
-    pub fn answer_question<F>(&self, system_prompt: &str, question: &str, mut on_token: F) -> Result<(), String>
+    pub fn answer_question_with_history<F>(
+        &self,
+        system_prompt: &str,
+        history: &[(String, String)],
+        question: &str,
+        mut on_token: F,
+    ) -> Result<(), String>
     where
         F: FnMut(&str),
     {
         // Initialize context size
         let ctx_params = LlamaContextParams::default()
-            .with_n_ctx(NonZeroU32::new(1024));
+            .with_n_ctx(NonZeroU32::new(2048));
 
         let mut ctx = self.llama_model.new_context(&self.llama_backend, ctx_params)
             .map_err(|e| format!("Failed to create LLaMA context: {}", e))?;
 
-        // Format prompt using Qwen instruct template
-        let prompt = format!(
-            "<|im_start|>system\n{}<|im_end|>\n<|im_start|>user\n{}<|im_end|>\n<|im_start|>assistant\n",
-            system_prompt, question
-        );
+        // Format prompt using Qwen instruct template with history
+        let mut prompt = String::new();
+        prompt.push_str("<|im_start|>system\n");
+        prompt.push_str(system_prompt);
+        prompt.push_str("\n\nIMPORTANT: You are a real-time meeting assistant. Analyze the user's transcript. If it contains an explicit or implicit question, request, or command for information/explanation, write a direct and clear answer of 3-4 sentences. If it is only conversational filler, statements, or greetings without any query, you MUST remain completely silent and output absolutely nothing.");
+        prompt.push_str("<|im_end|>\n");
+        
+        for (q, a) in history {
+            prompt.push_str("<|im_start|>user\n");
+            prompt.push_str(q);
+            prompt.push_str("<|im_end|>\n");
+            prompt.push_str("<|im_start|>assistant\n");
+            prompt.push_str(a);
+            prompt.push_str("<|im_end|>\n");
+        }
+        
+        prompt.push_str("<|im_start|>user\n");
+        prompt.push_str(question);
+        prompt.push_str("<|im_end|>\n");
+        prompt.push_str("<|im_start|>assistant\n");
 
         let tokens = self.llama_model.str_to_token(&prompt, AddBos::Always)
             .map_err(|e| format!("Prompt tokenization failed: {}", e))?;
@@ -141,7 +162,6 @@ impl ModelEngines {
         let max_tokens = 512;
         let mut batch = LlamaBatch::new(max_tokens, 1);
 
-        // Feed prompt tokens to context batch
         for (i, &token) in tokens.iter().enumerate() {
             let is_last = i == tokens.len() - 1;
             batch.add(token, i as i32, &[0], is_last)
@@ -158,7 +178,7 @@ impl ModelEngines {
         let mut decoder = encoding_rs::UTF_8.new_decoder();
         let mut filter = ThinkingFilter::new();
 
-        while generated_tokens < 150 {
+        while generated_tokens < 200 {
             let next_token = sampler.sample(&ctx, (batch.n_tokens() - 1) as i32);
             sampler.accept(next_token);
 

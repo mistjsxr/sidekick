@@ -106,6 +106,7 @@ struct AppState {
     engines: Mutex<Option<models::ModelEngines>>,
     whisper_worker: Mutex<Option<WhisperWorker>>,
     system_prompt: Mutex<String>,
+    conversation_history: Mutex<Vec<(String, String)>>,
 }
 
 #[tauri::command]
@@ -236,7 +237,10 @@ async fn reset_app(state: State<'_, AppState>, app_handle: tauri::AppHandle) -> 
     *worker_guard = None;
 
     let mut prompt_guard = state.system_prompt.lock().unwrap();
-    *prompt_guard = "You are an expert candidate in a job interview. Answer the user's question directly, professionally, and extremely concisely. Your response MUST be only 1 or 2 short sentences suitable for speaking. Do not include any reasoning, thinking process, code blocks, or intro/outro text. Just give the direct answer.".to_string();
+    *prompt_guard = "You are an expert candidate in a job interview. Answer the user's question directly, professionally, and clearly. Keep your response to 3 or 4 concise sentences suitable for speaking. Do not include any reasoning, thinking process, code blocks, or intro/outro text. Just give the direct answer.".to_string();
+
+    let mut history_guard = state.conversation_history.lock().unwrap();
+    history_guard.clear();
 
     let app_data_dir = app_handle.path().app_data_dir()
         .map_err(|e| format!("Failed to resolve App Data directory: {}", e))?;
@@ -247,6 +251,14 @@ async fn reset_app(state: State<'_, AppState>, app_handle: tauri::AppHandle) -> 
         let _ = fs::create_dir_all(&app_data_dir);
     }
 
+    Ok(())
+}
+
+#[tauri::command]
+fn clear_conversation_history(state: State<'_, AppState>) -> Result<(), String> {
+    let mut history_guard = state.conversation_history.lock().unwrap();
+    history_guard.clear();
+    println!("[AI Engine] Conversation history cleared.");
     Ok(())
 }
 
@@ -309,54 +321,60 @@ pub fn run() {
                                 let now = chrono::Local::now();
                                 let timestamp = now.format("%H:%M:%S").to_string();
 
-                                // Simple question checking
-                                let text_lower = text.to_lowercase();
-                                let is_question = text.ends_with('?') || 
-                                    text_lower.starts_with("how") ||
-                                    text_lower.starts_with("what") ||
-                                    text_lower.starts_with("why") ||
-                                    text_lower.starts_with("where") ||
-                                    text_lower.starts_with("when") ||
-                                    text_lower.starts_with("who") ||
-                                    text_lower.starts_with("which") ||
-                                    text_lower.starts_with("can you") ||
-                                    text_lower.starts_with("could you") ||
-                                    text_lower.starts_with("is there");
+                                // Extract-and-answer logic
+                                let text_trim = text.trim().to_string();
+                                let word_count = text_trim.split_whitespace().count();
+                                
+                                println!("[AI Engine] Transcript: \"{}\"", text_trim);
 
-                                println!("[AI Engine] Transcript: \"{}\" (is_question: {})", text, is_question);
-
-                                // 1. Emit the block to the UI
+                                // 1. Emit the block to the UI immediately as a non-question (left-column only)
                                 let payload = serde_json::json!({
                                     "id": block_counter.to_string(),
                                     "timestamp": timestamp,
-                                    "text": text.clone(),
-                                    "answer": if is_question { Some("") } else { None },
-                                    "isQuestion": is_question,
+                                    "text": text_trim.clone(),
+                                    "answer": None::<String>,
+                                    "isQuestion": false,
                                 });
                                 let _ = app_handle.emit("transcription", payload);
 
-                                // 2. If it is a question, generate LLM answer
-                                if is_question {
+                                // 2. If it is long enough to potentially contain a question/prompt, run inference
+                                if word_count >= 3 {
                                     let system_prompt = state.system_prompt.lock().unwrap().clone();
+                                    let history_clone = state.conversation_history.lock().unwrap().clone();
                                     let app_handle_clone = app_handle.clone();
+                                    let text_clone = text_trim.clone();
                                     
-                                    // Run LLaMA generation on a blocking thread pool
-                                    let text_clone = text.clone();
+                                    // Run generation on a blocking thread pool
                                     tokio::task::spawn_blocking(move || {
                                         let engines_ref = app_handle_clone.state::<AppState>();
                                         let engines_guard = engines_ref.engines.lock().unwrap();
                                         if let Some(engines) = &*engines_guard {
                                             let block_id = block_counter.to_string();
                                             let mut answer_accum = String::new();
-                                            let res = engines.answer_question(&system_prompt, &text_clone, |token| {
-                                                answer_accum.push_str(token);
-                                                let token_payload = serde_json::json!({
-                                                    "id": block_id.clone(),
-                                                    "token": token,
-                                                });
-                                                let _ = app_handle_clone.emit("llm-token", token_payload);
-                                            });
-                                            println!("[AI Engine] Answer: \"{}\"", answer_accum);
+                                            let res = engines.answer_question_with_history(
+                                                &system_prompt,
+                                                &history_clone,
+                                                &text_clone,
+                                                |token| {
+                                                    answer_accum.push_str(token);
+                                                    let token_payload = serde_json::json!({
+                                                        "id": block_id.clone(),
+                                                        "token": token,
+                                                    });
+                                                    let _ = app_handle_clone.emit("llm-token", token_payload);
+                                                }
+                                            );
+                                            
+                                            let final_answer = answer_accum.trim();
+                                            if !final_answer.is_empty() {
+                                                println!("[AI Engine] Answer: \"{}\"", final_answer);
+                                                // Save the successful exchange to history
+                                                let mut history_guard = engines_ref.conversation_history.lock().unwrap();
+                                                history_guard.push((text_clone, final_answer.to_string()));
+                                            } else {
+                                                println!("[AI Engine] Answer was empty, query ignored.");
+                                            }
+                                            
                                             if let Err(e) = res {
                                                 eprintln!("[AI Engine] Qwen error: {}", e);
                                             }
@@ -397,7 +415,8 @@ pub fn run() {
                 transcribe_tx: tx,
                 engines: Mutex::new(loaded_engines),
                 whisper_worker: Mutex::new(loaded_worker),
-                system_prompt: Mutex::new("You are an expert candidate in a job interview. Answer the user's question directly, professionally, and extremely concisely. Your response MUST be only 1 or 2 short sentences suitable for speaking. Do not include any reasoning, thinking process, code blocks, or intro/outro text. Just give the direct answer.".to_string()),
+                system_prompt: Mutex::new("You are an expert candidate in a job interview. Answer the user's question directly, professionally, and clearly. Keep your response to 3 or 4 concise sentences suitable for speaking. Do not include any reasoning, thinking process, code blocks, or intro/outro text. Just give the direct answer.".to_string()),
+                conversation_history: Mutex::new(Vec::new()),
             });
 
             Ok(())
@@ -415,7 +434,8 @@ pub fn run() {
             get_system_prompt,
             save_system_prompt,
             check_screen_permission,
-            request_screen_permission
+            request_screen_permission,
+            clear_conversation_history
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

@@ -48,7 +48,7 @@ function App() {
 
   // Settings state: Optimized for small interview answers
   const [systemPrompt, setSystemPrompt] = useState<string>(
-    "You are a helpful assistant. Give a concise, clear answer suitable for a job interview. Keep it to 1-2 short sentences."
+    "You are an expert candidate in a job interview. Answer the user's question directly, professionally, and clearly. Keep your response to 3 or 4 concise sentences suitable for speaking. Do not include any reasoning, thinking process, code blocks, or intro/outro text. Just give the direct answer."
   );
 
   // App running state
@@ -198,9 +198,15 @@ function App() {
     }
   };
 
-  const handleRestartCapture = () => {
+  const handleRestartCapture = async () => {
     setBlocks([]);
-    showToast("Conversation cleared", "info");
+    try {
+      await invoke("clear_conversation_history");
+      showToast("Conversation cleared", "info");
+    } catch (err) {
+      console.error("Failed to clear conversation history:", err);
+      showToast(`Error clearing conversation: ${err}`, "error");
+    }
   };
 
   const handleDeleteModels = async () => {
@@ -262,7 +268,7 @@ function App() {
       setModelsExist(false);
       setModelsMounted(false);
       setBlocks([]);
-      setSystemPrompt("You are a helpful assistant. Give a concise, clear answer suitable for a job interview. Keep it to 1-2 short sentences.");
+      setSystemPrompt("You are an expert candidate in a job interview. Answer the user's question directly, professionally, and clearly. Keep your response to 3 or 4 concise sentences suitable for speaking. Do not include any reasoning, thinking process, code blocks, or intro/outro text. Just give the direct answer.");
       setIsOnboarded(false);
       setIsSettingsOpen(false);
       setShowResetConfirm(false);
@@ -371,6 +377,7 @@ function App() {
             if (block.id === id) {
               return {
                 ...block,
+                isQuestion: true,
                 answer: (block.answer || "") + token,
               };
             }
