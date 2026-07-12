@@ -1,1 +1,28 @@
 @import "tailwindcss";
+
+@theme {
+  --color-darkblue-950: #030712;
+  --color-darkblue-900: #0a192f;
+  --color-darkblue-850: #0f223f;
+  --color-darkblue-800: #172a45;
+  --color-darkblue-700: #233554;
+  --color-cyan-glowing: #00f2fe;
+  --color-blue-glowing: #4facfe;
+}
+
+@layer utilities {
+  .scrollbar-thin::-webkit-scrollbar {
+    width: 6px;
+    height: 6px;
+  }
+  .scrollbar-thin::-webkit-scrollbar-track {
+    background: transparent;
+  }
+  .scrollbar-thin::-webkit-scrollbar-thumb {
+    background: var(--color-darkblue-800);
+    border-radius: 4px;
+  }
+  .scrollbar-thin::-webkit-scrollbar-thumb:hover {
+    background: var(--color-darkblue-700);
+  }
+}

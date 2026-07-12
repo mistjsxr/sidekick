@@ -102,6 +102,27 @@ impl SCStreamOutput for AudioStreamHandler {
                 return;
             }
 
+            // Diagnostic: Print stats of the first few chunks to see if we're getting valid float PCM data
+            static mut DIAGNOSTIC_COUNTER: usize = 0;
+            unsafe {
+                DIAGNOSTIC_COUNTER += 1;
+                if DIAGNOSTIC_COUNTER % 50 == 1 {
+                    let min_val = src_samples.iter().fold(f32::INFINITY, |m, &x| m.min(x));
+                    let max_val = src_samples.iter().fold(f32::NEG_INFINITY, |m, &x| m.max(x));
+                    let avg_val = src_samples.iter().sum::<f32>() / src_samples.len() as f32;
+                    let sample_slice = if src_samples.len() > 5 { &src_samples[0..5] } else { &src_samples };
+                    println!(
+                        "[Audio Diagnostics] Chunk #{}: len={}, min={:.6}, max={:.6}, avg={:.6}, samples={:?}",
+                        DIAGNOSTIC_COUNTER,
+                        src_samples.len(),
+                        min_val,
+                        max_val,
+                        avg_val,
+                        sample_slice
+                    );
+                }
+            }
+
             // Downsample to 16kHz mono PCM
             let resampled = resample_to_16k(&src_samples, sample_rate);
 

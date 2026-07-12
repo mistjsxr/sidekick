@@ -192,7 +192,7 @@ pub fn run() {
                 capture_session: Mutex::new(None),
                 transcribe_tx: tx,
                 engines: Mutex::new(loaded_engines),
-                system_prompt: Mutex::new("You are an assistant. Answer the following question in one sentence:".to_string()),
+                system_prompt: Mutex::new("You are a helpful assistant. Give a concise, clear answer suitable for a job interview. Keep it to 1-2 short sentences.".to_string()),
             });
 
             Ok(())
