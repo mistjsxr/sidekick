@@ -43,21 +43,7 @@ function App() {
   );
 
   // App running state
-  const [blocks, setBlocks] = useState<TranscriptionBlock[]>([
-    {
-      id: "1",
-      timestamp: "10:42:15",
-      text: "How do we implement GPU acceleration in Apple Silicon?",
-      answer: "Apple Silicon uses the Metal framework for GPU acceleration, allowing unified memory access between the CPU and GPU for extremely fast tensor operations.",
-      isQuestion: true
-    },
-    {
-      id: "2",
-      timestamp: "10:41:02",
-      text: "Welcome to the Glance meeting. We will start by discussing the project scaffolding.",
-      isQuestion: false
-    }
-  ]);
+  const [blocks, setBlocks] = useState<TranscriptionBlock[]>([]);
 
   // Request permissions placeholder
   const requestPermissions = async () => {
@@ -65,25 +51,19 @@ function App() {
     setMicPermission(true);
   };
 
-  // Model download simulator
-  const startDownload = () => {
+  // Model downloader using Tauri backend commands
+  const startDownload = async () => {
     setIsDownloading(true);
-    let whisperVal = 0;
-    let llmVal = 0;
-
-    const interval = setInterval(() => {
-      if (whisperVal < 100) {
-        whisperVal += 5;
-        setDownloadProgress(prev => ({ ...prev, whisper: Math.min(whisperVal, 100) }));
-      } else if (llmVal < 100) {
-        llmVal += 2.5;
-        setDownloadProgress(prev => ({ ...prev, llm: Math.min(llmVal, 100) }));
-      } else {
-        clearInterval(interval);
-        setIsDownloading(false);
-        setIsOnboarded(true);
-      }
-    }, 100);
+    try {
+      await invoke("download_models");
+      await invoke("load_models");
+      setIsDownloading(false);
+      setIsOnboarded(true);
+    } catch (err) {
+      console.error("Download failed:", err);
+      alert(`Model download failed: ${err}`);
+      setIsDownloading(false);
+    }
   };
 
   // Core capture commands
@@ -113,9 +93,39 @@ function App() {
     }, 300);
   };
 
-  // Setup Tauri listener on mount
+  // Save Settings wrapper
+  const handleSaveSettings = async () => {
+    try {
+      await invoke("save_system_prompt", { prompt: systemPrompt });
+      setIsSettingsOpen(false);
+    } catch (err) {
+      console.error("Failed to save prompt:", err);
+    }
+  };
+
+  // Setup Tauri listeners and startup checks
   useEffect(() => {
-    let unlisten: (() => void) | undefined;
+    // 1. Initial checks
+    const initChecks = async () => {
+      try {
+        const prompt = await invoke<string>("get_system_prompt");
+        setSystemPrompt(prompt);
+
+        const exist = await invoke<boolean>("check_models_exist");
+        if (exist) {
+          await invoke("load_models");
+          setIsOnboarded(true);
+        }
+      } catch (err) {
+        console.error("Startup checks failed:", err);
+      }
+    };
+    initChecks();
+
+    // 2. Listeners
+    let unlistenTranscribe: (() => void) | undefined;
+    let unlistenTokens: (() => void) | undefined;
+    let unlistenProgress: (() => void) | undefined;
 
     listen<TranscriptionBlock>("transcription", (event) => {
       const newBlock = event.payload;
@@ -125,17 +135,39 @@ function App() {
         }
         return [newBlock, ...prev];
       });
-
       if (newBlock.isQuestion) {
         setStatus("Inferring");
-        setTimeout(() => setStatus("Listening"), 2500);
       }
-    }).then(unlistenFn => {
-      unlisten = unlistenFn;
-    });
+    }).then(fn => unlistenTranscribe = fn);
+
+    listen<any>("llm-token", (event) => {
+      const { id, token } = event.payload;
+      setBlocks(prev => 
+        prev.map(block => {
+          if (block.id === id) {
+            return {
+              ...block,
+              answer: (block.answer || "") + token,
+            };
+          }
+          return block;
+        })
+      );
+      setStatus("Listening");
+    }).then(fn => unlistenTokens = fn);
+
+    listen<any>("download-progress", (event) => {
+      const { model, progress } = event.payload;
+      setDownloadProgress(prev => ({
+        ...prev,
+        [model]: progress
+      }));
+    }).then(fn => unlistenProgress = fn);
 
     return () => {
-      if (unlisten) unlisten();
+      if (unlistenTranscribe) unlistenTranscribe();
+      if (unlistenTokens) unlistenTokens();
+      if (unlistenProgress) unlistenProgress();
     };
   }, []);
 
@@ -375,7 +407,7 @@ function App() {
 
             <div className="flex justify-end gap-2 pt-2">
               <button 
-                onClick={() => setIsSettingsOpen(false)}
+                onClick={handleSaveSettings}
                 className="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 rounded-xl text-xs font-semibold text-white transition-all shadow-lg shadow-indigo-600/10"
               >
                 Save Settings
