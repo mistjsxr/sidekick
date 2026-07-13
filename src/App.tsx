@@ -51,6 +51,8 @@ function App() {
     "You are an expert candidate in a job interview. Answer the user's question directly, professionally, and clearly. Keep your response to 3 or 4 concise sentences suitable for speaking. Do not include any reasoning, thinking process, code blocks, or intro/outro text. Just give the direct answer."
   );
 
+  const [referenceQAsText, setReferenceQAsText] = useState<string>("");
+
   // App running state
   const [blocks, setBlocks] = useState<TranscriptionBlock[]>([]);
   const [copiedId, setCopiedId] = useState<string | null>(null);
@@ -283,9 +285,29 @@ function App() {
   const handleSaveSettings = async () => {
     try {
       await invoke("save_system_prompt", { prompt: systemPrompt });
+
+      // Clean and normalize reference questions (strip list numbers, bullet points, etc.)
+      const cleanedLines = referenceQAsText
+        .split("\n")
+        .map(line => {
+          let clean = line.trim();
+          // Remove list prefixes like "1.", "1)", "a.", "a)", "A.", "A)", "-", "*", "•", "o", "+"
+          clean = clean.replace(/^(?:(?:\d+|[a-zA-Z])[\.\)]|[-*•o+])\s*/, "");
+          return clean.trim();
+        })
+        .filter(line => line.length > 0);
+
+      const cleanedText = cleanedLines.join("\n");
+      setReferenceQAsText(cleanedText);
+
+      const qas = cleanedLines.map(line => ({ question: line, answer: "" }));
+      await invoke("save_reference_qas", { qas });
+
       setIsSettingsOpen(false);
+      showToast("Settings saved and questions normalized successfully", "success");
     } catch (err) {
-      console.error("Failed to save prompt:", err);
+      console.error("Failed to save settings:", err);
+      showToast(`Save failed: ${err}`, "error");
     }
   };
 
@@ -318,6 +340,10 @@ function App() {
       try {
         const prompt = await invoke<string>("get_system_prompt");
         setSystemPrompt(prompt);
+
+        const qas = await invoke<{ question: string; answer: string }[]>("load_reference_qas");
+        const qasText = qas.map(qa => qa.question).join("\n");
+        setReferenceQAsText(qasText);
 
         const exist = await invoke<boolean>("check_models_exist");
         setModelsExist(exist);
@@ -742,6 +768,31 @@ function App() {
                   onChange={(e) => setSystemPrompt(e.target.value)}
                   className="w-full text-sm bg-darkblue-900 border border-darkblue-850 rounded-2xl p-4 text-slate-300 focus:outline-none focus:border-blue-500 focus:text-white transition-colors resize-none shadow-inner"
                   placeholder="Enter system prompt guidelines..."
+                />
+              </div>
+
+              <div className="space-y-2 pt-4 border-t border-darkblue-900/60">
+                <div className="flex items-center justify-between">
+                  <h2 className="text-lg font-bold text-slate-200">Reference Questions</h2>
+                  <button
+                    onClick={() => {
+                      setReferenceQAsText("");
+                      showToast("Reference questions cleared. Click 'Save Settings' to apply.", "info");
+                    }}
+                    className="px-3 py-1 bg-rose-600/20 hover:bg-rose-600 border border-rose-500/30 hover:border-rose-500 text-rose-300 hover:text-white rounded-lg text-xs font-semibold transition-all cursor-pointer"
+                  >
+                    Clear All
+                  </button>
+                </div>
+                <p className="text-xs text-slate-400">
+                  Paste a list of expected meeting questions (one per line). Spoken transcripts that are phonetically similar will be auto-corrected to these exact questions before Qwen generates the answer.
+                </p>
+                <textarea 
+                  rows={8}
+                  value={referenceQAsText}
+                  onChange={(e) => setReferenceQAsText(e.target.value)}
+                  className="w-full text-sm bg-darkblue-900 border border-darkblue-850 rounded-2xl p-4 text-slate-300 focus:outline-none focus:border-blue-500 focus:text-white transition-colors font-mono resize-none shadow-inner"
+                  placeholder={"What is an array?\nWhat is a function?\nWhat is recursion?\nWhat is DBMS?"}
                 />
               </div>
 

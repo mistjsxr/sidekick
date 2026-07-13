@@ -66,6 +66,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         params.set_print_progress(false);
         params.set_print_realtime(false);
         params.set_print_timestamps(false);
+        params.set_initial_prompt("computer science, database management system, DBMS, database, programming, array, structure, function, pointer, class, object, inheritance, encapsulation, polymorphism, compiler, interpreter, CPU, RAM, registers, memory, stack, heap, hardware, operating system, OS");
 
         let start_time = std::time::Instant::now();
         if let Err(e) = state.full(params, &audio_data) {

@@ -108,6 +108,12 @@ fn get_worker_path() -> Result<std::path::PathBuf, String> {
     Err("whisper_worker binary not found. Please build the workspace first.".to_string())
 }
 
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug)]
+struct ReferenceQA {
+    question: String,
+    answer: String,
+}
+
 struct AppState {
     capture_session: Mutex<Option<audio::CaptureSession>>,
     transcribe_tx: tokio::sync::mpsc::Sender<Vec<f32>>,
@@ -116,6 +122,7 @@ struct AppState {
     system_prompt: Mutex<String>,
     conversation_history: Mutex<Vec<(String, String)>>,
     active_generation_id: std::sync::atomic::AtomicU64,
+    reference_qas: Mutex<Vec<ReferenceQA>>,
 }
 
 #[tauri::command]
@@ -246,7 +253,7 @@ async fn reset_app(state: State<'_, AppState>, app_handle: tauri::AppHandle) -> 
     *worker_guard = None;
 
     let mut prompt_guard = state.system_prompt.lock().unwrap();
-    *prompt_guard = "You are an expert computer science tutor. Think about the question inside a thinking block first. Then, provide a technically accurate, simple explanation of the queried concept. Keep your final answer concise (around 35-40 words total) using clear, simple language. DO NOT mention meta-terms like 'BCA', 'course', 'curriculum', 'pre-prompt', or names of subjects in your final output; just give the direct definition itself.".to_string();
+    *prompt_guard = "You are an expert computer science tutor. Think about the question inside a thinking block first. The input query is transcribed from speech and may contain phonetic errors or typos (e.g., 'areas' instead of 'arrays', 'pointer' instead of 'painter'). If a word seems out of context for computer science/programming, contextually correct it to the most relevant computer science term in your thinking process. Then, provide a technically accurate, simple explanation of the corrected concept. Keep your final answer concise (around 35-40 words total) using clear, simple language. DO NOT mention meta-terms like 'BCA', 'course', 'curriculum', 'pre-prompt', or names of subjects in your final output; just give the direct definition itself.".to_string();
 
     let mut history_guard = state.conversation_history.lock().unwrap();
     history_guard.clear();
@@ -260,6 +267,86 @@ async fn reset_app(state: State<'_, AppState>, app_handle: tauri::AppHandle) -> 
         let _ = fs::create_dir_all(&app_data_dir);
     }
 
+    Ok(())
+}
+
+fn levenshtein_distance(s1: &str, s2: &str) -> usize {
+    let v1: Vec<char> = s1.chars().collect();
+    let v2: Vec<char> = s2.chars().collect();
+    let len1 = v1.len();
+    let len2 = v2.len();
+    let mut dp = vec![vec![0; len2 + 1]; len1 + 1];
+    
+    for i in 0..=len1 {
+        dp[i][0] = i;
+    }
+    for j in 0..=len2 {
+        dp[0][j] = j;
+    }
+    
+    for i in 1..=len1 {
+        for j in 1..=len2 {
+            let cost = if v1[i - 1] == v2[j - 1] { 0 } else { 1 };
+            dp[i][j] = std::cmp::min(
+                dp[i - 1][j] + 1,
+                std::cmp::min(dp[i][j - 1] + 1, dp[i - 1][j - 1] + cost)
+            );
+        }
+    }
+    dp[len1][len2]
+}
+
+fn calculate_similarity(s1: &str, s2: &str) -> f64 {
+    let clean1: String = s1.chars().filter(|&c| c.is_alphanumeric() || c.is_whitespace()).collect::<String>().to_lowercase();
+    let clean2: String = s2.chars().filter(|&c| c.is_alphanumeric() || c.is_whitespace()).collect::<String>().to_lowercase();
+    
+    let c1 = clean1.trim();
+    let c2 = clean2.trim();
+    
+    if c1 == c2 {
+        return 1.0;
+    }
+    
+    if c1.contains(c2) || c2.contains(c1) {
+        let len_diff = (c1.len() as isize - c2.len() as isize).abs();
+        if len_diff < 20 {
+            return 0.90;
+        }
+    }
+    
+    let dist = levenshtein_distance(c1, c2);
+    let max_len = std::cmp::max(c1.len(), c2.len());
+    if max_len == 0 {
+        return 1.0;
+    }
+    1.0 - (dist as f64 / max_len as f64)
+}
+
+#[tauri::command]
+async fn load_reference_qas(state: State<'_, AppState>) -> Result<Vec<ReferenceQA>, String> {
+    let qas = state.reference_qas.lock().unwrap().clone();
+    Ok(qas)
+}
+
+#[tauri::command]
+async fn save_reference_qas(
+    qas: Vec<ReferenceQA>,
+    state: State<'_, AppState>,
+    app_handle: tauri::AppHandle,
+) -> Result<(), String> {
+    {
+        let mut guard = state.reference_qas.lock().unwrap();
+        *guard = qas.clone();
+    }
+    
+    if let Ok(app_data_dir) = app_handle.path().app_data_dir() {
+        let _ = fs::create_dir_all(&app_data_dir);
+        let ref_file = app_data_dir.join("reference_qas.json");
+        let content = serde_json::to_string_pretty(&qas)
+            .map_err(|e| format!("Failed to serialize QAs: {}", e))?;
+        fs::write(ref_file, content)
+            .map_err(|e| format!("Failed to write file: {}", e))?;
+    }
     Ok(())
 }
 
@@ -297,6 +384,45 @@ fn request_screen_permission() -> Result<(), String> {
             .spawn();
     }
     Ok(())
+}
+
+fn sanitize_computer_science_terms(text: &str) -> String {
+    // Direct phrase-level normalizations for spaced/hyphenated variations
+    let normalized = text
+        .replace("N-A", "an array")
+        .replace("n-a", "an array")
+        .replace("N A", "an array")
+        .replace("n a", "an array")
+        .replace("N.A.", "an array")
+        .replace("n.a.", "an array");
+
+    let mut words: Vec<String> = normalized.split_whitespace().map(|w| w.to_string()).collect();
+    for word in &mut words {
+        // Extract only letters for matching (keeping punctuation intact)
+        let cleaned: String = word.chars().filter(|&c| c.is_alphabetic()).collect::<String>().to_lowercase();
+        match cleaned.as_str() {
+            "area" => {
+                *word = word.replace("area", "array").replace("Area", "Array").replace("AREA", "ARRAY");
+            }
+            "areas" => {
+                *word = word.replace("areas", "arrays").replace("Areas", "Arrays").replace("AREAS", "ARRAYS");
+            }
+            "painter" => {
+                *word = word.replace("painter", "pointer").replace("Painter", "Pointer").replace("PAINTER", "POINTER");
+            }
+            "painters" => {
+                *word = word.replace("painters", "pointers").replace("Painters", "Pointers").replace("PAINTERS", "POINTERS");
+            }
+            "glass" => {
+                *word = word.replace("glass", "class").replace("Glass", "Class").replace("GLASS", "CLASS");
+            }
+            "glasses" => {
+                *word = word.replace("glasses", "classes").replace("Glasses", "Classes").replace("GLASSES", "CLASSES");
+            }
+            _ => {}
+        }
+    }
+    words.join(" ")
 }
 
 fn is_noise_or_filler(text: &str) -> bool {
@@ -360,7 +486,9 @@ pub fn run() {
                         println!("[AI Engine] Transcribing audio chunk ({} samples)...", audio_chunk.len());
                         match worker.transcribe(&audio_chunk) {
                             Ok(text) => {
-                                let text_trim = text.trim().to_string();
+                                let raw_trim = text.trim().to_string();
+                                const _: () = (); // placeholder/guard helper
+                                let mut text_trim = sanitize_computer_science_terms(&raw_trim);
 
                                 // Ignore noise / filler words
                                 if is_noise_or_filler(&text_trim) {
@@ -403,6 +531,45 @@ pub fn run() {
                                     || text_lower.contains("definition");
 
                                 if word_count >= 3 && is_potential_query {
+                                     // Check if we can find a matching reference Q&A first
+                                     let ref_qas_guard = state.reference_qas.lock().unwrap();
+                                     let mut matched_answer: Option<String> = None;
+                                     let mut matched_question: Option<String> = None;
+                                     
+                                     for ref_qa in &*ref_qas_guard {
+                                         let sim = calculate_similarity(&text_trim, &ref_qa.question);
+                                         if sim >= 0.75 {
+                                             println!("[AI Engine] Match found in Reference QAs (score: {:.2}): \"{}\" -> \"{}\"", sim, text_trim, ref_qa.question);
+                                             matched_answer = Some(ref_qa.answer.clone());
+                                             matched_question = Some(ref_qa.question.clone());
+                                             break;
+                                         }
+                                     }
+                                     
+                                     if let (Some(answer), Some(question)) = (matched_answer, matched_question) {
+                                         if !answer.trim().is_empty() {
+                                             // 1. Emit the matched Q&A immediately (bypassing the LLM entirely)
+                                             let payload = serde_json::json!({
+                                                 "id": block_counter.to_string(),
+                                                 "timestamp": timestamp,
+                                                 "text": question,
+                                                 "answer": Some(answer.clone()),
+                                                 "isQuestion": true,
+                                             });
+                                             let _ = app_handle.emit("transcription", payload);
+                                             
+                                             // 2. Add to conversation history so future turns have context
+                                             let mut history_guard = state.conversation_history.lock().unwrap();
+                                             history_guard.push((question, answer));
+                                             
+                                             continue;
+                                         } else {
+                                             // Dynamic query correction mode: overwrite transcript text with the clean question!
+                                             println!("[AI Engine] Correcting transcript using reference question: \"{}\" -> \"{}\"", text_trim, question);
+                                             text_trim = question;
+                                         }
+                                     }
+
                                      let system_prompt = state.system_prompt.lock().unwrap().clone();
                                      let app_handle_clone = app_handle.clone();
                                      let text_clone = text_trim.clone();
@@ -486,15 +653,27 @@ pub fn run() {
                 None
             };
 
+            let ref_file = app_data_dir.join("reference_qas.json");
+            let loaded_qas = if ref_file.exists() {
+                if let Ok(content) = fs::read_to_string(&ref_file) {
+                    serde_json::from_str::<Vec<ReferenceQA>>(&content).unwrap_or_default()
+                } else {
+                    Vec::new()
+                }
+            } else {
+                Vec::new()
+            };
+
             app.manage(AppState {
-                capture_session: Mutex::new(None),
-                transcribe_tx: tx,
-                engines: Mutex::new(loaded_engines),
-                whisper_worker: Mutex::new(loaded_worker),
-                system_prompt: Mutex::new("You are an expert computer science tutor. Think about the question inside a thinking block first. Then, provide a technically accurate, simple explanation of the queried concept. Keep your final answer concise (around 35-40 words total) using clear, simple language. DO NOT mention meta-terms like 'BCA', 'course', 'curriculum', 'pre-prompt', or names of subjects in your final output; just give the direct definition itself.".to_string()),
-                conversation_history: Mutex::new(Vec::new()),
-                active_generation_id: std::sync::atomic::AtomicU64::new(0),
-            });
+                 capture_session: Mutex::new(None),
+                 transcribe_tx: tx,
+                 engines: Mutex::new(loaded_engines),
+                 whisper_worker: Mutex::new(loaded_worker),
+                 system_prompt: Mutex::new("You are an expert computer science tutor. Think about the question inside a thinking block first. The input query is transcribed from speech and may contain phonetic errors or typos (e.g., 'areas' instead of 'arrays', 'pointer' instead of 'painter'). If a word seems out of context for computer science/programming, contextually correct it to the most relevant computer science term in your thinking process. Then, provide a technically accurate, simple explanation of the corrected concept. Keep your final answer concise (around 35-40 words total) using clear, simple language. DO NOT mention meta-terms like 'BCA', 'course', 'curriculum', 'pre-prompt', or names of subjects in your final output; just give the direct definition itself.".to_string()),
+                 conversation_history: Mutex::new(Vec::new()),
+                 active_generation_id: std::sync::atomic::AtomicU64::new(0),
+                 reference_qas: Mutex::new(loaded_qas),
+             });
 
             Ok(())
         })
@@ -512,7 +691,9 @@ pub fn run() {
             save_system_prompt,
             check_screen_permission,
             request_screen_permission,
-            clear_conversation_history
+            clear_conversation_history,
+            load_reference_qas,
+            save_reference_qas
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
