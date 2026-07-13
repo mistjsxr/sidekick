@@ -246,7 +246,7 @@ async fn reset_app(state: State<'_, AppState>, app_handle: tauri::AppHandle) -> 
     *worker_guard = None;
 
     let mut prompt_guard = state.system_prompt.lock().unwrap();
-    *prompt_guard = "You are an expert tutor for a Bachelor of Computer Applications (BCA) course. Think about the question inside a thinking block first. Then, explain the queried concept within the context of BCA topics (such as programming methodology, database management, computer architecture, or software engineering). Keep your final answer concise (around 35-40 words total) using clear, simple, and curriculum-accurate language without extra filler.".to_string();
+    *prompt_guard = "You are an expert computer science tutor. Think about the question inside a thinking block first. Then, provide a technically accurate, simple explanation of the queried concept. Keep your final answer concise (around 35-40 words total) using clear, simple language. DO NOT mention meta-terms like 'BCA', 'course', 'curriculum', 'pre-prompt', or names of subjects in your final output; just give the direct definition itself.".to_string();
 
     let mut history_guard = state.conversation_history.lock().unwrap();
     history_guard.clear();
@@ -491,7 +491,7 @@ pub fn run() {
                 transcribe_tx: tx,
                 engines: Mutex::new(loaded_engines),
                 whisper_worker: Mutex::new(loaded_worker),
-                system_prompt: Mutex::new("You are an expert tutor for a Bachelor of Computer Applications (BCA) course. Think about the question inside a thinking block first. Then, explain the queried concept within the context of BCA topics (such as programming methodology, database management, computer architecture, or software engineering). Keep your final answer concise (around 35-40 words total) using clear, simple, and curriculum-accurate language without extra filler.".to_string()),
+                system_prompt: Mutex::new("You are an expert computer science tutor. Think about the question inside a thinking block first. Then, provide a technically accurate, simple explanation of the queried concept. Keep your final answer concise (around 35-40 words total) using clear, simple language. DO NOT mention meta-terms like 'BCA', 'course', 'curriculum', 'pre-prompt', or names of subjects in your final output; just give the direct definition itself.".to_string()),
                 conversation_history: Mutex::new(Vec::new()),
                 active_generation_id: std::sync::atomic::AtomicU64::new(0),
             });
