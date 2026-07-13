@@ -246,7 +246,7 @@ async fn reset_app(state: State<'_, AppState>, app_handle: tauri::AppHandle) -> 
     *worker_guard = None;
 
     let mut prompt_guard = state.system_prompt.lock().unwrap();
-    *prompt_guard = "You are a helpful, direct assistant. Think about the question inside a thinking block first. Then, output your final answer. The final answer MUST be extremely short (1 or 2 simple sentences, max 30 words) and explain the concept in very simple, easy-to-understand words. Avoid technical jargon or complex details.".to_string();
+    *prompt_guard = "You are an expert tutor for a Bachelor of Computer Applications (BCA) course. Think about the question inside a thinking block first. Then, explain the queried concept within the context of BCA topics (such as programming methodology, database management, computer architecture, or software engineering). Keep your final answer concise (around 35-40 words total) using clear, simple, and curriculum-accurate language without extra filler.".to_string();
 
     let mut history_guard = state.conversation_history.lock().unwrap();
     history_guard.clear();
@@ -491,7 +491,7 @@ pub fn run() {
                 transcribe_tx: tx,
                 engines: Mutex::new(loaded_engines),
                 whisper_worker: Mutex::new(loaded_worker),
-                system_prompt: Mutex::new("You are a helpful, direct assistant. Think about the question inside a thinking block first. Then, output your final answer. The final answer MUST be extremely short (1 or 2 simple sentences, max 30 words) and explain the concept in very simple, easy-to-understand words. Avoid technical jargon or complex details.".to_string()),
+                system_prompt: Mutex::new("You are an expert tutor for a Bachelor of Computer Applications (BCA) course. Think about the question inside a thinking block first. Then, explain the queried concept within the context of BCA topics (such as programming methodology, database management, computer architecture, or software engineering). Keep your final answer concise (around 35-40 words total) using clear, simple, and curriculum-accurate language without extra filler.".to_string()),
                 conversation_history: Mutex::new(Vec::new()),
                 active_generation_id: std::sync::atomic::AtomicU64::new(0),
             });
