@@ -36,9 +36,15 @@ impl ThinkingFilter {
                     self.buffer = self.buffer[pos + 8..].to_string();
                     self.in_think = false;
                 } else {
-                    if self.buffer.len() > 8 {
-                        let drain_len = self.buffer.len() - 7;
-                        self.buffer = self.buffer[drain_len..].to_string();
+                    let len = self.buffer.len();
+                    if len > 8 {
+                        let mut drain_pos = len - 7;
+                        while !self.buffer.is_char_boundary(drain_pos) {
+                            drain_pos += 1;
+                        }
+                        if drain_pos < len {
+                            self.buffer = self.buffer[drain_pos..].to_string();
+                        }
                     }
                     break;
                 }
@@ -51,19 +57,20 @@ impl ThinkingFilter {
                     self.in_think = true;
                 } else {
                     let mut possible_start = false;
-                    for i in 1..=6 {
-                        if self.buffer.len() >= i {
-                            let suffix = &self.buffer[self.buffer.len() - i..];
+                    let mut match_len = 0;
+                    for i in (1..=6).rev() {
+                        if let Some(suffix) = self.buffer.get(self.buffer.len().saturating_sub(i)..) {
                             if "<think>".starts_with(suffix) {
                                 possible_start = true;
+                                match_len = suffix.len();
                                 break;
                             }
                         }
                     }
 
                     if possible_start {
-                        if self.buffer.len() > 6 {
-                            let emit_len = self.buffer.len() - 6;
+                        let emit_len = self.buffer.len() - match_len;
+                        if emit_len > 0 {
                             on_token(&self.buffer[..emit_len]);
                             self.buffer = self.buffer[emit_len..].to_string();
                         }
@@ -123,6 +130,8 @@ impl ModelEngines {
         system_prompt: &str,
         history: &[(String, String)],
         question: &str,
+        my_id: u64,
+        active_id: &std::sync::atomic::AtomicU64,
         mut on_token: F,
     ) -> Result<(), String>
     where
@@ -142,7 +151,14 @@ impl ModelEngines {
         prompt.push_str("\n\nIMPORTANT: You are a real-time meeting assistant. Analyze the user's transcript. If it contains an explicit or implicit question, request, or command for information/explanation, write a direct and clear answer of 3-4 sentences. If it is only conversational filler, statements, or greetings without any query, you MUST remain completely silent and output absolutely nothing.");
         prompt.push_str("<|im_end|>\n");
         
-        for (q, a) in history {
+        // Limit history to the last 5 entries to prevent context window overflow
+        let history_limit = 5;
+        let history_start = if history.len() > history_limit {
+            history.len() - history_limit
+        } else {
+            0
+        };
+        for (q, a) in &history[history_start..] {
             prompt.push_str("<|im_start|>user\n");
             prompt.push_str(q);
             prompt.push_str("<|im_end|>\n");
@@ -159,7 +175,7 @@ impl ModelEngines {
         let tokens = self.llama_model.str_to_token(&prompt, AddBos::Always)
             .map_err(|e| format!("Prompt tokenization failed: {}", e))?;
 
-        let max_tokens = 512;
+        let max_tokens = tokens.len();
         let mut batch = LlamaBatch::new(max_tokens, 1);
 
         for (i, &token) in tokens.iter().enumerate() {
@@ -171,14 +187,24 @@ impl ModelEngines {
         ctx.decode(&mut batch)
             .map_err(|e| format!("Failed to decode prompt: {}", e))?;
 
-        // Loop to generate response tokens
-        let mut sampler = LlamaSampler::greedy();
+        // Set up sampler (with temperature to prevent loops on repeating sentences)
+        let mut sampler = LlamaSampler::chain_simple([
+            LlamaSampler::temp(0.7),
+            LlamaSampler::top_k(40),
+            LlamaSampler::top_p(0.95, 1),
+            LlamaSampler::dist(0),
+        ]);
         let mut current_pos = tokens.len() as i32;
         let mut generated_tokens = 0;
         let mut decoder = encoding_rs::UTF_8.new_decoder();
         let mut filter = ThinkingFilter::new();
 
-        while generated_tokens < 200 {
+        while generated_tokens < 1024 {
+            if active_id.load(std::sync::atomic::Ordering::SeqCst) != my_id {
+                println!("\n[AI Engine] Generation cancelled: active_id changed to {}", active_id.load(std::sync::atomic::Ordering::SeqCst));
+                break;
+            }
+
             let next_token = sampler.sample(&ctx, (batch.n_tokens() - 1) as i32);
             sampler.accept(next_token);
 
@@ -187,6 +213,9 @@ impl ModelEngines {
             }
 
             if let Ok(piece) = self.llama_model.token_to_piece(next_token, &mut decoder, false, None) {
+                // Log raw output to stdout for diagnostics
+                print!("{}", piece);
+                let _ = std::io::stdout().flush();
                 filter.process(&piece, &mut on_token);
             }
 
@@ -202,6 +231,8 @@ impl ModelEngines {
         }
 
         filter.flush(&mut on_token);
+        println!();
+        let _ = std::io::stdout().flush();
 
         Ok(())
     }

@@ -6,10 +6,7 @@ const isRelease = args.includes('build');
 
 console.log(`\x1b[36m[Sidekick Build] Pre-building whisper_worker (${isRelease ? 'release' : 'debug'})...\x1b[0m`);
 
-const cargoArgs = ['build', '-p', 'whisper_worker'];
-if (isRelease) {
-  cargoArgs.push('--release');
-}
+const cargoArgs = ['build', '-p', 'whisper_worker', '--release'];
 
 const buildResult = spawnSync('cargo', cargoArgs, {
   cwd: path.join(__dirname, '../src-tauri'),

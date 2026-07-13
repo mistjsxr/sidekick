@@ -11,9 +11,8 @@ use screencapturekit::shareable_content::SCShareableContent;
 use tokio::sync::mpsc::Sender;
 
 // Silence detection settings
-const RMS_THRESHOLD: f32 = 0.001;        // Energy threshold for speech (more sensitive for digital speaker capture)
-const SILENCE_DURATION_SEC: f32 = 1.5;   // Silence duration to trigger segment boundary
-const MAX_BUFFER_DURATION_SEC: f32 = 15.0; // Max audio chunk duration to prevent overflow
+const SILENCE_DURATION_SEC: f32 = 0.6;   // Silence duration to trigger segment boundary (adjusted from 1.5 for faster turnaround)
+const MAX_BUFFER_DURATION_SEC: f32 = 8.0; // Max audio chunk duration to prevent overflow (adjusted from 15.0)
 
 pub struct AudioErrorHandler;
 
@@ -28,6 +27,7 @@ pub struct CaptureState {
     pub is_speaking: bool,
     pub silence_samples: usize,
     pub transcribe_tx: Sender<Vec<f32>>,
+    pub noise_floor: f32,
 }
 
 pub struct AudioStreamHandler {
@@ -102,27 +102,6 @@ impl SCStreamOutput for AudioStreamHandler {
                 return;
             }
 
-            // Diagnostic: Print stats of the first few chunks to see if we're getting valid float PCM data
-            static mut DIAGNOSTIC_COUNTER: usize = 0;
-            unsafe {
-                DIAGNOSTIC_COUNTER += 1;
-                if DIAGNOSTIC_COUNTER % 50 == 1 {
-                    let min_val = src_samples.iter().fold(f32::INFINITY, |m, &x| m.min(x));
-                    let max_val = src_samples.iter().fold(f32::NEG_INFINITY, |m, &x| m.max(x));
-                    let avg_val = src_samples.iter().sum::<f32>() / src_samples.len() as f32;
-                    let sample_slice = if src_samples.len() > 5 { &src_samples[0..5] } else { &src_samples };
-                    println!(
-                        "[Audio Diagnostics] Chunk #{}: len={}, min={:.6}, max={:.6}, avg={:.6}, samples={:?}",
-                        DIAGNOSTIC_COUNTER,
-                        src_samples.len(),
-                        min_val,
-                        max_val,
-                        avg_val,
-                        sample_slice
-                    );
-                }
-            }
-
             // Downsample to 16kHz mono PCM
             let resampled = resample_to_16k(&src_samples, sample_rate);
 
@@ -134,12 +113,50 @@ impl SCStreamOutput for AudioStreamHandler {
 
             state.buffered_audio.extend_from_slice(&resampled);
 
-            let is_currently_silence = rms < RMS_THRESHOLD;
+            // Update noise floor slowly to adapt to background noise
+            if rms < state.noise_floor {
+                // Drop instantly if current level is quieter than noise floor
+                state.noise_floor = rms;
+            } else {
+                // Drift slowly upwards to adapt to continuous background noise (hum, fan)
+                state.noise_floor = state.noise_floor * 0.9995 + rms * 0.0005;
+            }
+            // Clamp noise floor to a sane range
+            state.noise_floor = state.noise_floor.clamp(0.0005, 0.015);
+
+            // Dynamic threshold: scale of noise floor + margin
+            let dynamic_threshold = state.noise_floor * 2.5 + 0.002;
+
+            let is_currently_silence = rms < dynamic_threshold;
             if !is_currently_silence {
                 state.is_speaking = true;
                 state.silence_samples = 0;
             } else {
                 state.silence_samples += resampled.len();
+            }
+
+            // Diagnostic: Print stats of the first few chunks to see if we're getting valid float PCM data
+            static mut DIAGNOSTIC_COUNTER: usize = 0;
+            unsafe {
+                DIAGNOSTIC_COUNTER += 1;
+                if DIAGNOSTIC_COUNTER % 100 == 1 {
+                    let min_val = src_samples.iter().fold(f32::INFINITY, |m, &x| m.min(x));
+                    let max_val = src_samples.iter().fold(f32::NEG_INFINITY, |m, &x| m.max(x));
+                    let avg_val = src_samples.iter().sum::<f32>() / src_samples.len() as f32;
+                    let sample_slice = if src_samples.len() > 5 { &src_samples[0..5] } else { &src_samples };
+                    println!(
+                        "[Audio Diagnostics] Chunk #{}: len={}, min={:.6}, max={:.6}, avg={:.6}, rms={:.6}, noise_floor={:.6}, threshold={:.6}, samples={:?}",
+                        DIAGNOSTIC_COUNTER,
+                        src_samples.len(),
+                        min_val,
+                        max_val,
+                        avg_val,
+                        rms,
+                        state.noise_floor,
+                        dynamic_threshold,
+                        sample_slice
+                    );
+                }
             }
 
             // Truncate silent buffers to avoid holding onto/transcribing pure silence
@@ -230,6 +247,7 @@ impl CaptureSession {
             is_speaking: false,
             silence_samples: 0,
             transcribe_tx,
+            noise_floor: 0.001,
         }));
 
         let mut stream = SCStream::new_with_delegate(&filter, &config, AudioErrorHandler);

@@ -81,10 +81,18 @@ fn get_worker_path() -> Result<std::path::PathBuf, String> {
     let current_exe = std::env::current_exe().map_err(|e| format!("Failed to get current exe path: {}", e))?;
     let exe_dir = current_exe.parent().ok_or("Failed to get exe directory")?;
     
-    // During dev, it will be in the same target/debug folder as sidekick
+    // 1. Look in the same directory as the current executable (debug or release)
     let dev_path = exe_dir.join("whisper_worker");
     if dev_path.exists() {
         return Ok(dev_path);
+    }
+    
+    // 2. Look in the sibling release folder if running in debug (dev mode)
+    if let Some(target_dir) = exe_dir.parent() {
+        let release_path = target_dir.join("release").join("whisper_worker");
+        if release_path.exists() {
+            return Ok(release_path);
+        }
     }
     
     // Fallback search in exe directory in case of name suffixes or bundling
@@ -107,6 +115,7 @@ struct AppState {
     whisper_worker: Mutex<Option<WhisperWorker>>,
     system_prompt: Mutex<String>,
     conversation_history: Mutex<Vec<(String, String)>>,
+    active_generation_id: std::sync::atomic::AtomicU64,
 }
 
 #[tauri::command]
@@ -237,7 +246,7 @@ async fn reset_app(state: State<'_, AppState>, app_handle: tauri::AppHandle) -> 
     *worker_guard = None;
 
     let mut prompt_guard = state.system_prompt.lock().unwrap();
-    *prompt_guard = "You are an expert candidate in a job interview. Answer the user's question directly, professionally, and clearly. Keep your response to 3 or 4 concise sentences suitable for speaking. Do not include any reasoning, thinking process, code blocks, or intro/outro text. Just give the direct answer.".to_string();
+    *prompt_guard = "You are a helpful, direct assistant. Think about the question inside a thinking block first. Then, output your final answer. The final answer MUST be extremely short (1 or 2 simple sentences, max 30 words) and explain the concept in very simple, easy-to-understand words. Avoid technical jargon or complex details.".to_string();
 
     let mut history_guard = state.conversation_history.lock().unwrap();
     history_guard.clear();
@@ -290,6 +299,45 @@ fn request_screen_permission() -> Result<(), String> {
     Ok(())
 }
 
+fn is_noise_or_filler(text: &str) -> bool {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return true;
+    }
+    
+    // Check for Whisper tag hallucinations like "*sad music*", "*applause*", etc.
+    if (trimmed.starts_with('*') && trimmed.ends_with('*')) 
+        || (trimmed.starts_with('[') && trimmed.ends_with(']')) 
+        || (trimmed.starts_with('(') && trimmed.ends_with(')')) 
+    {
+        return true;
+    }
+    
+    let lower = trimmed.to_lowercase();
+    
+    // Ignore single/double character punctuation artifacts (e.g. "-", ".", "_")
+    if lower.len() <= 2 && lower.chars().all(|c| !c.is_alphanumeric()) {
+        return true;
+    }
+    
+    // Ignore standalone common filler words/phrases (case insensitive)
+    let word_count = lower.split_whitespace().count();
+    if word_count <= 2 {
+        let filler_words = [
+            "okay", "ok", "yes", "yeah", "yep", "no", "nah", 
+            "thank you", "thanks", "right", "all right", "sigh", 
+            "peace", "hello", "hi", "bye", "ooh", "shh", "sure"
+        ];
+        // Remove trailing punctuation for matching
+        let clean_lower = lower.replace(['.', ',', '?', '!'], "").trim().to_string();
+        if filler_words.iter().any(|&f| clean_lower == f) {
+            return true;
+        }
+    }
+    
+    false
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let (tx, mut rx) = tokio::sync::mpsc::channel::<Vec<f32>>(100);
@@ -312,17 +360,17 @@ pub fn run() {
                         println!("[AI Engine] Transcribing audio chunk ({} samples)...", audio_chunk.len());
                         match worker.transcribe(&audio_chunk) {
                             Ok(text) => {
-                                if text.is_empty() {
-                                    println!("[AI Engine] Whisper output was empty silence.");
+                                let text_trim = text.trim().to_string();
+
+                                // Ignore noise / filler words
+                                if is_noise_or_filler(&text_trim) {
+                                    println!("[AI Engine] Ignored noise/filler: \"{}\"", text_trim);
                                     continue;
                                 }
 
                                 block_counter += 1;
                                 let now = chrono::Local::now();
                                 let timestamp = now.format("%H:%M:%S").to_string();
-
-                                // Extract-and-answer logic
-                                let text_trim = text.trim().to_string();
                                 let word_count = text_trim.split_whitespace().count();
                                 
                                 println!("[AI Engine] Transcript: \"{}\"", text_trim);
@@ -337,45 +385,73 @@ pub fn run() {
                                 });
                                 let _ = app_handle.emit("transcription", payload);
 
-                                // 2. If it is long enough to potentially contain a question/prompt, run inference
-                                if word_count >= 3 {
-                                    let system_prompt = state.system_prompt.lock().unwrap().clone();
-                                    let history_clone = state.conversation_history.lock().unwrap().clone();
-                                    let app_handle_clone = app_handle.clone();
-                                    let text_clone = text_trim.clone();
-                                    
-                                    // Run generation on a blocking thread pool
-                                    tokio::task::spawn_blocking(move || {
-                                        let engines_ref = app_handle_clone.state::<AppState>();
-                                        let engines_guard = engines_ref.engines.lock().unwrap();
-                                        if let Some(engines) = &*engines_guard {
-                                            let block_id = block_counter.to_string();
-                                            let mut answer_accum = String::new();
-                                            let res = engines.answer_question_with_history(
-                                                &system_prompt,
-                                                &history_clone,
-                                                &text_clone,
-                                                |token| {
-                                                    answer_accum.push_str(token);
-                                                    let token_payload = serde_json::json!({
-                                                        "id": block_id.clone(),
-                                                        "token": token,
-                                                    });
-                                                    let _ = app_handle_clone.emit("llm-token", token_payload);
-                                                }
-                                            );
-                                            
-                                            let final_answer = answer_accum.trim();
-                                            if !final_answer.is_empty() {
-                                                println!("[AI Engine] Answer: \"{}\"", final_answer);
-                                                // Save the successful exchange to history
-                                                let mut history_guard = engines_ref.conversation_history.lock().unwrap();
-                                                history_guard.push((text_clone, final_answer.to_string()));
-                                            } else {
-                                                println!("[AI Engine] Answer was empty, query ignored.");
-                                            }
-                                            
-                                            if let Err(e) = res {
+                                // 2. Check if the transcript contains typical question/command markers to trigger LLM
+                                let text_lower = text_trim.to_lowercase();
+                                let is_potential_query = text_lower.contains('?') 
+                                    || text_lower.contains("what")
+                                    || text_lower.contains("how")
+                                    || text_lower.contains("why")
+                                    || text_lower.contains("who")
+                                    || text_lower.contains("can")
+                                    || text_lower.contains("could")
+                                    || text_lower.contains("explain")
+                                    || text_lower.contains("tell")
+                                    || text_lower.contains("describe")
+                                    || text_lower.contains("difference")
+                                    || text_lower.contains("define")
+                                    || text_lower.contains("meaning")
+                                    || text_lower.contains("definition");
+
+                                if word_count >= 3 && is_potential_query {
+                                     let system_prompt = state.system_prompt.lock().unwrap().clone();
+                                     let app_handle_clone = app_handle.clone();
+                                     let text_clone = text_trim.clone();
+                                     
+                                     // Increment generation ID to cancel any running generation
+                                     let my_id = state.active_generation_id.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+                                     
+                                     // Run generation on a blocking thread pool
+                                     tokio::task::spawn_blocking(move || {
+                                         let engines_ref = app_handle_clone.state::<AppState>();
+                                         let engines_guard = engines_ref.engines.lock().unwrap();
+                                         if let Some(engines) = &*engines_guard {
+                                             // Lock history inside the thread pool to get the latest completed conversation history
+                                             let history = engines_ref.conversation_history.lock().unwrap().clone();
+                                             
+                                             let block_id = block_counter.to_string();
+                                             let mut answer_accum = String::new();
+                                             let res = engines.answer_question_with_history(
+                                                 &system_prompt,
+                                                 &history,
+                                                 &text_clone,
+                                                 my_id,
+                                                 &engines_ref.active_generation_id,
+                                                 |token| {
+                                                     answer_accum.push_str(token);
+                                                     let token_payload = serde_json::json!({
+                                                         "id": block_id.clone(),
+                                                         "token": token,
+                                                     });
+                                                     let _ = app_handle_clone.emit("llm-token", token_payload);
+                                                 }
+                                             );
+                                             
+                                             // Only append to history if the generation was not cancelled midway
+                                             if engines_ref.active_generation_id.load(std::sync::atomic::Ordering::SeqCst) == my_id {
+                                                 let final_answer = answer_accum.trim();
+                                                 if !final_answer.is_empty() {
+                                                     println!("[AI Engine] Answer: \"{}\"", final_answer);
+                                                     // Save the successful exchange to history
+                                                     let mut history_guard = engines_ref.conversation_history.lock().unwrap();
+                                                     history_guard.push((text_clone, final_answer.to_string()));
+                                                 } else {
+                                                     println!("[AI Engine] Answer was empty, query ignored.");
+                                                 }
+                                             } else {
+                                                 println!("[AI Engine] Generation ID {} was cancelled, skipping history update.", my_id);
+                                             }
+                                             
+                                             if let Err(e) = res {
                                                 eprintln!("[AI Engine] Qwen error: {}", e);
                                             }
                                         }
@@ -415,8 +491,9 @@ pub fn run() {
                 transcribe_tx: tx,
                 engines: Mutex::new(loaded_engines),
                 whisper_worker: Mutex::new(loaded_worker),
-                system_prompt: Mutex::new("You are an expert candidate in a job interview. Answer the user's question directly, professionally, and clearly. Keep your response to 3 or 4 concise sentences suitable for speaking. Do not include any reasoning, thinking process, code blocks, or intro/outro text. Just give the direct answer.".to_string()),
+                system_prompt: Mutex::new("You are a helpful, direct assistant. Think about the question inside a thinking block first. Then, output your final answer. The final answer MUST be extremely short (1 or 2 simple sentences, max 30 words) and explain the concept in very simple, easy-to-understand words. Avoid technical jargon or complex details.".to_string()),
                 conversation_history: Mutex::new(Vec::new()),
+                active_generation_id: std::sync::atomic::AtomicU64::new(0),
             });
 
             Ok(())
