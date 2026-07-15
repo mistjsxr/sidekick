@@ -194,24 +194,36 @@ impl SCStreamOutput for AudioStreamHandler {
     }
 }
 
-// Linear resampling from arbitrary sample rate to 16000 Hz
+// Linear resampling from arbitrary sample rate to 16000 Hz with a moving average low-pass filter to prevent aliasing
 fn resample_to_16k(src: &[f32], src_rate: f32) -> Vec<f32> {
     let target_rate = 16000.0;
     if (src_rate - target_rate).abs() < 1.0 {
         return src.to_vec();
     }
 
+    // Apply a simple 3-tap moving average filter as a low-pass filter to prevent aliasing
+    let mut filtered = vec![0.0f32; src.len()];
+    if src.len() >= 3 {
+        filtered[0] = src[0];
+        for i in 1..src.len() - 1 {
+            filtered[i] = (src[i - 1] + src[i] + src[i + 1]) / 3.0;
+        }
+        filtered[src.len() - 1] = src[src.len() - 1];
+    } else {
+        filtered.copy_from_slice(src);
+    }
+
     let ratio = src_rate / target_rate;
-    let target_len = (src.len() as f32 / ratio).floor() as usize;
+    let target_len = (filtered.len() as f32 / ratio).floor() as usize;
     let mut dest = Vec::with_capacity(target_len);
 
     for i in 0..target_len {
         let src_index = i as f32 * ratio;
         let index_floor = src_index.floor() as usize;
-        let index_ceil = (index_floor + 1).min(src.len() - 1);
+        let index_ceil = (index_floor + 1).min(filtered.len() - 1);
         let weight = src_index - index_floor as f32;
 
-        let sample = (1.0 - weight) * src[index_floor] + weight * src[index_ceil];
+        let sample = (1.0 - weight) * filtered[index_floor] + weight * filtered[index_ceil];
         dest.push(sample);
     }
     dest

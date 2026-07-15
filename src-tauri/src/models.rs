@@ -213,7 +213,7 @@ impl ModelEngines {
         // Set up sampler (with temperature to prevent loops on repeating sentences)
         let mut sampler = LlamaSampler::chain_simple([
             LlamaSampler::logit_bias(self.llama_model.n_vocab(), &biases),
-            LlamaSampler::temp(0.7),
+            LlamaSampler::temp(0.1),
             LlamaSampler::top_k(40),
             LlamaSampler::top_p(0.95, 1),
             LlamaSampler::dist(0),

@@ -71,6 +71,7 @@ function App() {
     // 1. Slide down left transcript list
     if (blocks.length > prevBlocksLength.current) {
       if (transcriptListRef.current) {
+        transcriptListRef.current.scrollTo({ top: 0, behavior: "smooth" });
         const firstChild = transcriptListRef.current.firstElementChild;
         if (firstChild) {
           gsap.fromTo(
@@ -95,6 +96,7 @@ function App() {
     const questionsCount = blocks.filter(b => b.isQuestion).length;
     if (questionsCount > prevQuestionsLength.current) {
       if (answersListRef.current) {
+        answersListRef.current.scrollTo({ top: 0, behavior: "smooth" });
         const firstChild = answersListRef.current.firstElementChild;
         if (firstChild) {
           gsap.fromTo(

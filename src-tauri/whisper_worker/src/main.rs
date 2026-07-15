@@ -1,5 +1,5 @@
 use std::env;
-use std::io::{self, Read, Write};
+use std::io::{self, Read, Write, BufReader, BufWriter};
 use whisper_rs::{WhisperContext, WhisperContextParameters, FullParams, SamplingStrategy};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -17,8 +17,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     )?;
     eprintln!("[Whisper Worker] Model loaded on GPU/Metal successfully.");
 
-    let mut stdin = io::stdin();
-    let mut stdout = io::stdout();
+    let mut state = whisper_ctx.create_state()
+        .map_err(|e| format!("Failed to create Whisper state: {}", e))?;
+
+    let mut stdin = BufReader::new(io::stdin());
+    let mut stdout = BufWriter::new(io::stdout());
 
     loop {
         // 1. Read number of samples (u32, 4 bytes)
@@ -50,14 +53,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
 
         // 3. Perform transcription
-        let mut state = match whisper_ctx.create_state() {
-            Ok(s) => s,
-            Err(e) => {
-                eprintln!("[Whisper Worker] Failed to create state: {}", e);
-                continue;
-            }
-        };
-        
         let mut params = FullParams::new(SamplingStrategy::Greedy { best_of: 1 });
         params.set_language(Some("en"));
         params.set_n_threads(4);
@@ -66,7 +61,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         params.set_print_progress(false);
         params.set_print_realtime(false);
         params.set_print_timestamps(false);
-        params.set_initial_prompt("computer science, database management system, DBMS, database, programming, array, structure, function, pointer, class, object, inheritance, encapsulation, polymorphism, compiler, interpreter, CPU, RAM, registers, memory, stack, heap, hardware, operating system, OS");
+        params.set_initial_prompt("DBMS, SQL, DDL, DML, DCL, TCL, ACID, RDBMS, normalization, Primary Key, Foreign Key, Candidate Key, joins, transaction, PL/SQL, views, database management system");
 
         let start_time = std::time::Instant::now();
         if let Err(e) = state.full(params, &audio_data) {
