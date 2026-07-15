@@ -9,6 +9,7 @@ use llama_cpp_2::model::params::LlamaModelParams;
 use llama_cpp_2::context::params::LlamaContextParams;
 use llama_cpp_2::llama_batch::LlamaBatch;
 use llama_cpp_2::sampling::LlamaSampler;
+use llama_cpp_2::token::logit_bias::LlamaLogitBias;
 use std::num::NonZeroU32;
 
 struct ThinkingFilter {
@@ -98,6 +99,7 @@ impl ThinkingFilter {
 pub struct ModelEngines {
     pub llama_model: LlamaModel,
     pub llama_backend: LlamaBackend,
+    pub think_token_ids: Vec<llama_cpp_2::token::LlamaToken>,
 }
 
 impl ModelEngines {
@@ -119,9 +121,24 @@ impl ModelEngines {
         )
         .map_err(|e| format!("Failed to load LLaMA model: {}", e))?;
 
+        // Scan the model vocabulary for exact special thinking tokens
+        let mut think_token_ids = Vec::new();
+        let mut decoder = encoding_rs::UTF_8.new_decoder();
+        let n_vocab = llama_model.n_vocab();
+        for i in 0..n_vocab {
+            let token = llama_cpp_2::token::LlamaToken(i as i32);
+            if let Ok(piece) = llama_model.token_to_piece(token, &mut decoder, true, None) {
+                if piece == "<think>" || piece == "</think>" {
+                    println!("[Inference Engine] Found special thinking token: {:?} (ID: {})", piece, i);
+                    think_token_ids.push(token);
+                }
+            }
+        }
+
         Ok(ModelEngines {
             llama_model,
             llama_backend,
+            think_token_ids,
         })
     }
 
@@ -148,7 +165,7 @@ impl ModelEngines {
         let mut prompt = String::new();
         prompt.push_str("<|im_start|>system\n");
         prompt.push_str(system_prompt);
-        prompt.push_str("\n\nIMPORTANT: You are a real-time meeting assistant. Analyze the user's transcript. If it contains an explicit or implicit question, request, or command for information/explanation, write a direct and clear answer of 3-4 sentences. If it is only conversational filler, statements, or greetings without any query, you MUST remain completely silent and output absolutely nothing.");
+        prompt.push_str("\n\nIMPORTANT: Write a direct, technically accurate, and clear answer of 2-3 sentences explaining the query. Start your answer directly with the explanation. Do not write any thinking process, internal monologue, greetings, or conversational filler.");
         prompt.push_str("<|im_end|>\n");
         
         // Limit history to the last 5 entries to prevent context window overflow
@@ -172,7 +189,7 @@ impl ModelEngines {
         prompt.push_str("<|im_end|>\n");
         prompt.push_str("<|im_start|>assistant\n");
 
-        let tokens = self.llama_model.str_to_token(&prompt, AddBos::Always)
+        let tokens = self.llama_model.str_to_token(&prompt, AddBos::Never)
             .map_err(|e| format!("Prompt tokenization failed: {}", e))?;
 
         let max_tokens = tokens.len();
@@ -187,8 +204,15 @@ impl ModelEngines {
         ctx.decode(&mut batch)
             .map_err(|e| format!("Failed to decode prompt: {}", e))?;
 
+        // Apply negative logit bias to the pre-scanned special thinking tokens to disable them
+        let mut biases = Vec::new();
+        for &token in &self.think_token_ids {
+            biases.push(LlamaLogitBias::new(token, -100.0));
+        }
+
         // Set up sampler (with temperature to prevent loops on repeating sentences)
         let mut sampler = LlamaSampler::chain_simple([
+            LlamaSampler::logit_bias(self.llama_model.n_vocab(), &biases),
             LlamaSampler::temp(0.7),
             LlamaSampler::top_k(40),
             LlamaSampler::top_p(0.95, 1),

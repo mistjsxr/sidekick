@@ -385,7 +385,7 @@ function App() {
           }
           return [newBlock, ...prev];
         });
-        if (newBlock.isQuestion) {
+        if (newBlock.isQuestion && !newBlock.answer) {
           setStatus("Inferring");
         }
       });

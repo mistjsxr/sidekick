@@ -253,7 +253,7 @@ async fn reset_app(state: State<'_, AppState>, app_handle: tauri::AppHandle) -> 
     *worker_guard = None;
 
     let mut prompt_guard = state.system_prompt.lock().unwrap();
-    *prompt_guard = "You are an expert computer science tutor. Think about the question inside a thinking block first. The input query is transcribed from speech and may contain phonetic errors or typos (e.g., 'areas' instead of 'arrays', 'pointer' instead of 'painter'). If a word seems out of context for computer science/programming, contextually correct it to the most relevant computer science term in your thinking process. Then, provide a technically accurate, simple explanation of the corrected concept. Keep your final answer concise (around 35-40 words total) using clear, simple language. DO NOT mention meta-terms like 'BCA', 'course', 'curriculum', 'pre-prompt', or names of subjects in your final output; just give the direct definition itself.".to_string();
+    *prompt_guard = "You are an expert computer science tutor specializing in Database Management Systems (DBMS). The input query is transcribed from speech and may contain phonetic errors or typos (e.g., 'areas' instead of 'arrays', 'pointer' instead of 'painter'). If a word seems out of context for computer science/programming, contextually correct it to the most relevant computer science term. Then, provide a technically accurate, simple explanation. Keep your answer direct and around 2 to 3 sentences, matching the style and format of these examples:\n\nExample 1:\nUser: What is a Primary Key?\nAssistant: A Primary Key is a unique identifier for a record in a database table. It ensures that no duplicate values exist in the key column and cannot contain NULL values.\n\nExample 2:\nUser: Which SQL statement is used to retrieve data?\nAssistant: The SELECT statement is used to retrieve data from a database. It allows you to specify the columns you want to fetch and filter records using a WHERE clause.".to_string();
 
     let mut history_guard = state.conversation_history.lock().unwrap();
     history_guard.clear();
@@ -391,13 +391,27 @@ fn sanitize_computer_science_terms(text: &str) -> String {
     let normalized = text
         .replace("N-A", "an array")
         .replace("n-a", "an array")
-        .replace("N A", "an array")
-        .replace("n a", "an array")
         .replace("N.A.", "an array")
         .replace("n.a.", "an array");
 
-    let mut words: Vec<String> = normalized.split_whitespace().map(|w| w.to_string()).collect();
-    for word in &mut words {
+    let words: Vec<String> = normalized.split_whitespace().map(|w| w.to_string()).collect();
+    let mut processed_words = Vec::new();
+    let mut i = 0;
+    while i < words.len() {
+        if i + 1 < words.len() {
+            let clean_curr = words[i].chars().filter(|&c| c.is_alphabetic()).collect::<String>().to_lowercase();
+            let clean_next = words[i+1].chars().filter(|&c| c.is_alphabetic()).collect::<String>().to_lowercase();
+            if clean_curr == "n" && clean_next == "a" {
+                processed_words.push("an array".to_string());
+                i += 2;
+                continue;
+            }
+        }
+        processed_words.push(words[i].clone());
+        i += 1;
+    }
+
+    for word in &mut processed_words {
         // Extract only letters for matching (keeping punctuation intact)
         let cleaned: String = word.chars().filter(|&c| c.is_alphabetic()).collect::<String>().to_lowercase();
         match cleaned.as_str() {
@@ -422,7 +436,7 @@ fn sanitize_computer_science_terms(text: &str) -> String {
             _ => {}
         }
     }
-    words.join(" ")
+    processed_words.join(" ")
 }
 
 fn is_noise_or_filler(text: &str) -> bool {
@@ -503,73 +517,105 @@ pub fn run() {
                                 
                                 println!("[AI Engine] Transcript: \"{}\"", text_trim);
 
-                                // 1. Emit the block to the UI immediately as a non-question (left-column only)
-                                let payload = serde_json::json!({
-                                    "id": block_counter.to_string(),
-                                    "timestamp": timestamp,
-                                    "text": text_trim.clone(),
-                                    "answer": None::<String>,
-                                    "isQuestion": false,
-                                });
-                                let _ = app_handle.emit("transcription", payload);
+                                // Check if we can find a matching reference Q&A first
+                                let ref_qas_guard = state.reference_qas.lock().unwrap();
+                                let mut matched_answer: Option<String> = None;
+                                let mut matched_question: Option<String> = None;
+                                let mut best_sim = 0.0;
+                                for ref_qa in &*ref_qas_guard {
+                                    let sim = calculate_similarity(&text_trim, &ref_qa.question);
+                                    if sim > best_sim {
+                                        best_sim = sim;
+                                        matched_answer = Some(ref_qa.answer.clone());
+                                        matched_question = Some(ref_qa.question.clone());
+                                    }
+                                }
+                                if best_sim < 0.75 {
+                                    matched_answer = None;
+                                    matched_question = None;
+                                } else {
+                                    println!("[AI Engine] Match found in Reference QAs (score: {:.2}): \"{}\" -> \"{}\"", best_sim, text_trim, matched_question.as_deref().unwrap_or(""));
+                                }
+                                drop(ref_qas_guard); // Release lock
 
-                                // 2. Check if the transcript contains typical question/command markers to trigger LLM
-                                let text_lower = text_trim.to_lowercase();
-                                let is_potential_query = text_lower.contains('?') 
-                                    || text_lower.contains("what")
-                                    || text_lower.contains("how")
-                                    || text_lower.contains("why")
-                                    || text_lower.contains("who")
-                                    || text_lower.contains("can")
-                                    || text_lower.contains("could")
-                                    || text_lower.contains("explain")
-                                    || text_lower.contains("tell")
-                                    || text_lower.contains("describe")
-                                    || text_lower.contains("difference")
-                                    || text_lower.contains("define")
-                                    || text_lower.contains("meaning")
-                                    || text_lower.contains("definition");
+                                let mut should_trigger_llm = false;
+                                let mut initial_emitted = false;
 
-                                if word_count >= 3 && is_potential_query {
-                                     // Check if we can find a matching reference Q&A first
-                                     let ref_qas_guard = state.reference_qas.lock().unwrap();
-                                     let mut matched_answer: Option<String> = None;
-                                     let mut matched_question: Option<String> = None;
-                                     
-                                     for ref_qa in &*ref_qas_guard {
-                                         let sim = calculate_similarity(&text_trim, &ref_qa.question);
-                                         if sim >= 0.75 {
-                                             println!("[AI Engine] Match found in Reference QAs (score: {:.2}): \"{}\" -> \"{}\"", sim, text_trim, ref_qa.question);
-                                             matched_answer = Some(ref_qa.answer.clone());
-                                             matched_question = Some(ref_qa.question.clone());
-                                             break;
-                                         }
-                                     }
-                                     
-                                     if let (Some(answer), Some(question)) = (matched_answer, matched_question) {
-                                         if !answer.trim().is_empty() {
-                                             // 1. Emit the matched Q&A immediately (bypassing the LLM entirely)
-                                             let payload = serde_json::json!({
-                                                 "id": block_counter.to_string(),
-                                                 "timestamp": timestamp,
-                                                 "text": question,
-                                                 "answer": Some(answer.clone()),
-                                                 "isQuestion": true,
-                                             });
-                                             let _ = app_handle.emit("transcription", payload);
-                                             
-                                             // 2. Add to conversation history so future turns have context
-                                             let mut history_guard = state.conversation_history.lock().unwrap();
-                                             history_guard.push((question, answer));
-                                             
-                                             continue;
-                                         } else {
-                                             // Dynamic query correction mode: overwrite transcript text with the clean question!
-                                             println!("[AI Engine] Correcting transcript using reference question: \"{}\" -> \"{}\"", text_trim, question);
-                                             text_trim = question;
-                                         }
-                                     }
+                                if let (Some(answer), Some(question)) = (matched_answer, matched_question) {
+                                    if !answer.trim().is_empty() {
+                                        // 1. Emit the matched Q&A immediately (bypassing the LLM entirely)
+                                        let payload = serde_json::json!({
+                                            "id": block_counter.to_string(),
+                                            "timestamp": timestamp,
+                                            "text": question,
+                                            "answer": Some(answer.clone()),
+                                            "isQuestion": true,
+                                        });
+                                        let _ = app_handle.emit("transcription", payload);
+                                        
+                                        // 2. Add to conversation history so future turns have context
+                                        let mut history_guard = state.conversation_history.lock().unwrap();
+                                        history_guard.push((question, answer));
+                                        
+                                        continue;
+                                    } else {
+                                        // Dynamic query correction mode: overwrite transcript text with the clean question!
+                                        println!("[AI Engine] Correcting transcript using reference question: \"{}\" -> \"{}\"", text_trim, question);
+                                        text_trim = question;
+                                        
+                                        // Emit the corrected question immediately
+                                        let payload = serde_json::json!({
+                                            "id": block_counter.to_string(),
+                                            "timestamp": timestamp,
+                                            "text": text_trim.clone(),
+                                            "answer": None::<String>,
+                                            "isQuestion": false,
+                                        });
+                                        let _ = app_handle.emit("transcription", payload);
+                                        initial_emitted = true;
+                                        
+                                        should_trigger_llm = true;
+                                    }
+                                }
 
+                                if !initial_emitted {
+                                    // Emit the block to the UI immediately as a non-question (left-column only)
+                                    let payload = serde_json::json!({
+                                        "id": block_counter.to_string(),
+                                        "timestamp": timestamp,
+                                        "text": text_trim.clone(),
+                                        "answer": None::<String>,
+                                        "isQuestion": false,
+                                    });
+                                    let _ = app_handle.emit("transcription", payload);
+                                }
+
+                                if !should_trigger_llm {
+                                    // 2. Check if the transcript contains typical question/command markers to trigger LLM
+                                    let text_lower = text_trim.to_lowercase();
+                                    let is_potential_query = text_lower.contains('?') 
+                                        || text_lower.contains("what")
+                                        || text_lower.contains("how")
+                                        || text_lower.contains("why")
+                                        || text_lower.contains("who")
+                                        || text_lower.contains("can")
+                                        || text_lower.contains("could")
+                                        || text_lower.contains("explain")
+                                        || text_lower.contains("tell")
+                                        || text_lower.contains("describe")
+                                        || text_lower.contains("difference")
+                                        || text_lower.contains("define")
+                                        || text_lower.contains("meaning")
+                                        || text_lower.contains("definition")
+                                        || text_lower.contains("discuss")
+                                        || text_lower.contains("which");
+
+                                    if word_count >= 3 && is_potential_query {
+                                        should_trigger_llm = true;
+                                    }
+                                }
+
+                                if should_trigger_llm {
                                      let system_prompt = state.system_prompt.lock().unwrap().clone();
                                      let app_handle_clone = app_handle.clone();
                                      let text_clone = text_trim.clone();
@@ -620,10 +666,10 @@ pub fn run() {
                                              
                                              if let Err(e) = res {
                                                 eprintln!("[AI Engine] Qwen error: {}", e);
-                                            }
-                                        }
-                                    });
-                                }
+                                             }
+                                         }
+                                     });
+                                 }
                             }
                             Err(e) => {
                                 eprintln!("[AI Engine] Whisper subprocess error: {}", e);
@@ -669,7 +715,7 @@ pub fn run() {
                  transcribe_tx: tx,
                  engines: Mutex::new(loaded_engines),
                  whisper_worker: Mutex::new(loaded_worker),
-                 system_prompt: Mutex::new("You are an expert computer science tutor. Think about the question inside a thinking block first. The input query is transcribed from speech and may contain phonetic errors or typos (e.g., 'areas' instead of 'arrays', 'pointer' instead of 'painter'). If a word seems out of context for computer science/programming, contextually correct it to the most relevant computer science term in your thinking process. Then, provide a technically accurate, simple explanation of the corrected concept. Keep your final answer concise (around 35-40 words total) using clear, simple language. DO NOT mention meta-terms like 'BCA', 'course', 'curriculum', 'pre-prompt', or names of subjects in your final output; just give the direct definition itself.".to_string()),
+                 system_prompt: Mutex::new("You are an expert computer science tutor specializing in Database Management Systems (DBMS). The input query is transcribed from speech and may contain phonetic errors or typos (e.g., 'areas' instead of 'arrays', 'pointer' instead of 'painter'). If a word seems out of context for computer science/programming, contextually correct it to the most relevant computer science term. Then, provide a technically accurate, simple explanation. Keep your answer direct and around 2 to 3 sentences, matching the style and format of these examples:\n\nExample 1:\nUser: What is a Primary Key?\nAssistant: A Primary Key is a unique identifier for a record in a database table. It ensures that no duplicate values exist in the key column and cannot contain NULL values.\n\nExample 2:\nUser: Which SQL statement is used to retrieve data?\nAssistant: The SELECT statement is used to retrieve data from a database. It allows you to specify the columns you want to fetch and filter records using a WHERE clause.".to_string()),
                  conversation_history: Mutex::new(Vec::new()),
                  active_generation_id: std::sync::atomic::AtomicU64::new(0),
                  reference_qas: Mutex::new(loaded_qas),
