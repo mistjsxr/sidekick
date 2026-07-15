@@ -187,7 +187,7 @@ impl ModelEngines {
         prompt.push_str("<|im_start|>user\n");
         prompt.push_str(question);
         prompt.push_str("<|im_end|>\n");
-        prompt.push_str("<|im_start|>assistant\n");
+        prompt.push_str("<|im_start|>assistant\n<think>\n</think>\n");
 
         let tokens = self.llama_model.str_to_token(&prompt, AddBos::Never)
             .map_err(|e| format!("Prompt tokenization failed: {}", e))?;
@@ -204,15 +204,8 @@ impl ModelEngines {
         ctx.decode(&mut batch)
             .map_err(|e| format!("Failed to decode prompt: {}", e))?;
 
-        // Apply negative logit bias to the pre-scanned special thinking tokens to disable them
-        let mut biases = Vec::new();
-        for &token in &self.think_token_ids {
-            biases.push(LlamaLogitBias::new(token, -100.0));
-        }
-
         // Set up sampler (with temperature to prevent loops on repeating sentences)
         let mut sampler = LlamaSampler::chain_simple([
-            LlamaSampler::logit_bias(self.llama_model.n_vocab(), &biases),
             LlamaSampler::temp(0.1),
             LlamaSampler::top_k(40),
             LlamaSampler::top_p(0.95, 1),
